@@ -1,0 +1,193 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile document",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "currentOrgId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["email", "displayName"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "Tenant organization record",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "ownerId": { "type": "string" },
+        "timezone": { "type": "string" },
+        "whatsappConnected": { "type": "boolean" },
+        "whatsappBusinessAccountId": { "type": "string" },
+        "whatsappPhoneNumberId": { "type": "string" },
+        "whatsappPhoneNumber": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "ownerId"]
+    },
+    "OrganizationMembership": {
+      "title": "OrganizationMembership",
+      "description": "User membership and role in an organization",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "admin", "agent"] },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["organizationId", "userId", "role"]
+    },
+    "Contact": {
+      "title": "Contact",
+      "description": "Customer contact record",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "company": { "type": "string" },
+        "whatsappOptIn": { "type": "boolean" },
+        "marketingOptIn": { "type": "boolean" },
+        "transactionalOptIn": { "type": "boolean" },
+        "optOut": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["Active", "Opted Out", "Invalid", "Blocked"] }
+      },
+      "required": ["organizationId", "phone"]
+    },
+    "ContactGroup": {
+      "title": "ContactGroup",
+      "description": "Contact segment group",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["organizationId", "name"]
+    },
+    "MessageTemplate": {
+      "title": "MessageTemplate",
+      "description": "WhatsApp message template",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "name": { "type": "string" },
+        "language": { "type": "string" },
+        "category": { "type": "string", "enum": ["Marketing", "Utility", "Authentication"] },
+        "status": { "type": "string", "enum": ["Approved", "Pending", "Rejected", "Paused"] },
+        "body": { "type": "string" }
+      },
+      "required": ["organizationId", "name", "category", "status", "body"]
+    },
+    "Campaign": {
+      "title": "Campaign",
+      "description": "Broadcast campaign",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "name": { "type": "string" },
+        "templateId": { "type": "string" },
+        "status": { "type": "string", "enum": ["Draft", "Scheduled", "Queued", "Sending", "Completed", "Partially Completed", "Cancelled"] }
+      },
+      "required": ["organizationId", "name", "templateId", "status"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "WhatsApp customer chat thread",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "contactPhone": { "type": "string" },
+        "status": { "type": "string", "enum": ["Open", "Closed"] }
+      },
+      "required": ["organizationId", "contactPhone", "status"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "Individual message in a conversation",
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "direction": { "type": "string", "enum": ["incoming", "outgoing"] },
+        "body": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["conversationId", "organizationId", "direction", "body"]
+    },
+    "AutomationRule": {
+      "title": "AutomationRule",
+      "description": "Automated response rule",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "name": { "type": "string" },
+        "trigger": { "type": "string" },
+        "actionType": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] }
+      },
+      "required": ["organizationId", "name", "trigger", "actionType", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/organizations/{orgId}": {
+      "schema": "Organization",
+      "description": "Organization details"
+    },
+    "/organization_memberships/{membershipId}": {
+      "schema": "OrganizationMembership",
+      "description": "Organization membership mapping"
+    },
+    "/contacts/{contactId}": {
+      "schema": "Contact",
+      "description": "Contacts for organizations"
+    },
+    "/contact_groups/{groupId}": {
+      "schema": "ContactGroup",
+      "description": "Contact groups for organizations"
+    },
+    "/message_templates/{templateId}": {
+      "schema": "MessageTemplate",
+      "description": "WhatsApp message templates"
+    },
+    "/campaigns/{campaignId}": {
+      "schema": "Campaign",
+      "description": "Broadcast campaigns"
+    },
+    "/campaign_recipients/{recipientId}": {
+      "schema": "Campaign",
+      "description": "Campaign recipient tracking"
+    },
+    "/conversations/{conversationId}": {
+      "schema": "Conversation",
+      "description": "Customer conversations"
+    },
+    "/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Chat messages"
+    },
+    "/automation_rules/{ruleId}": {
+      "schema": "AutomationRule",
+      "description": "Automation rules"
+    },
+    "/opt_in_history/{historyId}": {
+      "schema": "Contact",
+      "description": "Opt-in / opt-out consent audit log"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "Organization",
+      "description": "System audit logs"
+    }
+  }
+}

@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper to check authentication
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    // Connectivity test path
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // User profile: user can read and update their own document
+    match /users/{userId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Organizations: authenticated users can read/create/update organizations they belong to
+    match /organizations/{orgId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Memberships: authenticated users can read memberships for their org or themselves
+    match /organization_memberships/{membershipId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+      allow delete: if isAuthenticated();
+    }
+
+    // Contacts
+    match /contacts/{contactId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Contact groups
+    match /contact_groups/{groupId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Message templates
+    match /message_templates/{templateId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Campaigns
+    match /campaigns/{campaignId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Campaign recipients
+    match /campaign_recipients/{recipientId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Conversations
+    match /conversations/{conversationId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Messages
+    match /messages/{messageId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Automation rules
+    match /automation_rules/{ruleId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Opt-in audit log
+    match /opt_in_history/{historyId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Audit logs
+    match /audit_logs/{logId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Default fallback
+    match /{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+  }
+}
