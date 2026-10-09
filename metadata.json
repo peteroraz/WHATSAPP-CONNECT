@@ -1,6 +1,8 @@
 {
-  "name": "WhatsFlow",
+  "name": "WatsManager",
   "description": "WhatsApp Business broadcast campaigns, automated responses, contact management, and shared inbox powered by WhatsApp Cloud API.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

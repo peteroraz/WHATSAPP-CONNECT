@@ -572,7 +572,7 @@ export const NewBroadcastModal: React.FC<NewBroadcastModalProps> = ({
                 WhatsApp Compliance & Consent Policy
               </div>
               <p className="text-slate-600 text-[11px] leading-relaxed">
-                WhatsFlow automatically enforces compliance per WhatsApp Cloud API standards. Contacts who have opted out, lack the requisite consent category, or have invalid phone numbers will be automatically excluded before dispatch.
+                WatsManager automatically enforces compliance per WhatsApp Cloud API standards. Contacts who have opted out, lack the requisite consent category, or have invalid phone numbers will be automatically excluded before dispatch.
               </p>
             </div>
           </div>

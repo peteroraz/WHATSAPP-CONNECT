@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -21,5 +22,5 @@ app.get('*', (_req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`WhatsFlow production server active on port ${PORT}`);
+  console.log(`WatsManager production server active on port ${PORT}`);
 });

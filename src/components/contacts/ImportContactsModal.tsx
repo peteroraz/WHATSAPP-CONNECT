@@ -394,7 +394,7 @@ Fatima,Bello,+2348076543210,fatima.bello@saharagroup.org,Sahara Group,Event Atte
       subtitle={
         step === 'upload'
           ? 'Upload or paste CSV records with column mapping and duplicate phone detection.'
-          : 'Map source CSV columns to WhatsFlow fields and preview normalized records.'
+          : 'Map source CSV columns to WatsManager fields and preview normalized records.'
       }
       maxWidth={step === 'upload' ? 'xl' : '4xl'}
       id="import-contacts-modal"
@@ -529,7 +529,7 @@ Fatima,Bello,+2348076543210,fatima.bello@saharagroup.org,Sahara Group,Event Atte
                   Step 1: Source CSV Column Mapping
                 </h4>
                 <p className="text-[11px] text-slate-500">
-                  Select which WhatsFlow field each source CSV column should populate.
+                  Select which WatsManager field each source CSV column should populate.
                 </p>
               </div>
               <button

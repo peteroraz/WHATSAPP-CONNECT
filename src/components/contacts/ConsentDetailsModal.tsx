@@ -82,7 +82,7 @@ export const ConsentDetailsModal: React.FC<ConsentDetailsModalProps> = ({
                       : 'Recently'}
                   </span>
                   {contact.optOutSource ? ` via ${contact.optOutSource}` : ''}.
-                  WhatsFlow strictly blocks outbound marketing broadcasts to this number in compliance with WhatsApp Business policies.
+                  WatsManager strictly blocks outbound marketing broadcasts to this number in compliance with WhatsApp Business policies.
                 </p>
               </div>
             </div>

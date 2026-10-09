@@ -85,7 +85,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
             W
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">WhatsFlow</h1>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">WatsManager</h1>
             <p className="text-xs text-slate-500 font-medium">
               WhatsApp Broadcast & Automation Suite
             </p>

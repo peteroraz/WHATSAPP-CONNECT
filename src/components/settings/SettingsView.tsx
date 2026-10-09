@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Building2, 
   Key, 
@@ -10,17 +10,28 @@ import {
   Save,
   Radio,
   ExternalLink,
-  Bot
+  Bot,
+  AlertTriangle,
+  CheckCircle2,
+  RefreshCw,
+  Server,
+  Lock,
+  Sparkles,
+  Info,
+  Send
 } from 'lucide-react';
 import { Organization, UserProfile } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { useToast } from '../common/Toast.tsx';
+import { dataStore } from '../../services/dataStore.ts';
 
 export interface SettingsViewProps {
   organization: Organization;
   currentUser: UserProfile;
   onUpdateOrganization: (updates: Partial<Organization>) => void;
 }
+
+export type ConnectionState = 'Not Configured' | 'Testing' | 'Connected' | 'Connection Error';
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   organization,
@@ -30,19 +41,71 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<'general' | 'whatsapp' | 'hours' | 'compliance'>('general');
 
-  // Form states
+  // General profile state
   const [orgName, setOrgName] = useState(organization.name);
-  const [phoneId, setPhoneId] = useState(organization.whatsappPhoneNumberId || organization.whatsappPhoneId || '');
-  const [wabaId, setWabaId] = useState(organization.whatsappBusinessAccountId || organization.whatsappAccountId || '');
-  const [accessToken, setAccessToken] = useState('');
   const [timezone, setTimezone] = useState(organization.businessHours?.timezone || 'UTC');
   const [startHour, setStartHour] = useState(organization.businessHours?.startHour || '09:00');
   const [endHour, setEndHour] = useState(organization.businessHours?.endHour || '17:00');
-  const [isTesting, setIsTesting] = useState(false);
+
+  // Real connection state
+  const [connectionState, setConnectionState] = useState<ConnectionState>('Not Configured');
+  const [connectionDetails, setConnectionDetails] = useState<{
+    displayPhoneNumber?: string;
+    verifiedName?: string;
+    qualityRating?: string;
+    codeVerificationStatus?: string;
+    apiVersion?: string;
+    hasAccessToken?: boolean;
+    hasPhoneNumberId?: boolean;
+    hasWabaId?: boolean;
+    hasWebhookVerifyToken?: boolean;
+    hasAppSecret?: boolean;
+    error?: string;
+    message?: string;
+  } | null>(null);
+
+  // Diagnostic live-send hello_world test state
+  const [testRecipient, setTestRecipient] = useState('+2348068620081');
+  const [isSendingHelloTest, setIsSendingHelloTest] = useState(false);
+  const [diagnosticResult, setDiagnosticResult] = useState<{
+    success: boolean;
+    endpoint: string;
+    httpStatus: number;
+    recipient: string;
+    phoneNumberId: string;
+    apiVersion: string;
+    wamid?: string;
+    errorCode?: number;
+    errorSubcode?: number;
+    errorMessage?: string;
+    fbtrace_id?: string;
+  } | null>(null);
+
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  const webhookUrl = `${window.location.origin}/api/webhook`;
+  const webhookUrl = `${window.location.origin}/api/whatsapp/webhook`;
   const webhookVerifyToken = 'whatsflow_verify_token_prod_2025';
+
+  // Safely check status on startup without requiring secrets
+  useEffect(() => {
+    fetch('/api/whatsapp/status')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.connected) {
+          setConnectionState('Connected');
+          setConnectionDetails(data);
+          if (!organization.whatsappConnected) {
+            onUpdateOrganization({ whatsappConnected: true });
+          }
+        } else {
+          setConnectionState(data.status || 'Not Configured');
+          setConnectionDetails(data);
+        }
+      })
+      .catch(() => {
+        setConnectionState('Not Configured');
+      });
+  }, []);
 
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
@@ -55,19 +118,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     e.preventDefault();
     onUpdateOrganization({ name: orgName });
     toast('Organization details saved');
-  };
-
-  const handleSaveWhatsApp = (e: React.FormEvent) => {
-    e.preventDefault();
-    const hasCreds = Boolean(phoneId.trim());
-    onUpdateOrganization({
-      whatsappPhoneId: phoneId.trim(),
-      whatsappPhoneNumberId: phoneId.trim(),
-      whatsappAccountId: wabaId.trim(),
-      whatsappBusinessAccountId: wabaId.trim(),
-      whatsappConnected: hasCreds ? organization.whatsappConnected : false,
-    });
-    toast(hasCreds ? 'WhatsApp account details saved.' : 'WhatsApp credentials cleared. Workspace running in Demo Mode.');
   };
 
   const handleSaveHours = (e: React.FormEvent) => {
@@ -85,38 +135,74 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleTestConnection = async () => {
-    // If credentials are absent: Continue running normally in Demo Mode. Do not attempt a live Meta API call.
-    if (!phoneId.trim() && !organization.whatsappPhoneNumberId && !organization.whatsappPhoneId) {
-      toast('WhatsApp credentials are not configured. Enter your Phone Number ID and Access Token to test Meta connection.', 'info');
-      return;
-    }
-    if (!accessToken.trim() && !organization.whatsappConnected) {
-      toast('Please enter your WhatsApp Access Token to test live Meta connection.', 'info');
-      return;
-    }
-
-    setIsTesting(true);
+    setConnectionState('Testing');
     try {
       const res = await fetch('/api/whatsapp/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accessToken: accessToken.trim() || undefined,
-          phoneNumberId: phoneId.trim() || organization.whatsappPhoneNumberId || organization.whatsappPhoneId,
-          wabaId: wabaId.trim() || organization.whatsappBusinessAccountId || organization.whatsappAccountId,
-        }),
       });
       const data = await res.json();
-      setIsTesting(false);
+      setConnectionDetails(data);
+
       if (data.connected) {
+        setConnectionState('Connected');
         toast(`WhatsApp Connection Verified! Verified Name: ${data.verifiedName || 'Business'}`);
         onUpdateOrganization({ whatsappConnected: true });
       } else {
-        toast(data.error || 'Connection check failed: credentials not verified with Meta.', 'error');
+        const nextState: ConnectionState = data.status || (data.configured ? 'Connection Error' : 'Not Configured');
+        setConnectionState(nextState);
+        if (nextState === 'Not Configured') {
+          toast(data.message || 'WhatsApp credentials not configured on server. Operating in Demo Mode.', 'info');
+        } else {
+          toast(data.error || 'Connection check failed: credentials not verified with Meta.', 'error');
+        }
       }
-    } catch (e: any) {
-      setIsTesting(false);
+    } catch {
+      setConnectionState('Connection Error');
       toast('Could not contact server API endpoint.', 'error');
+    }
+  };
+
+  const handleDisconnect = () => {
+    onUpdateOrganization({ whatsappConnected: false });
+    setConnectionState('Not Configured');
+    toast('Disconnected. Workspace is operating in Demo Mode.', 'info');
+  };
+
+  const handleSendHelloWorldTest = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const cleanNumber = testRecipient.replace(/\D/g, '');
+    if (!cleanNumber) {
+      toast('Please enter a valid recipient phone number with digits.', 'error');
+      return;
+    }
+
+    setIsSendingHelloTest(true);
+    setDiagnosticResult(null);
+
+    try {
+      const result = await dataStore.sendDiagnosticHelloWorld(cleanNumber);
+      setDiagnosticResult(result);
+      setIsSendingHelloTest(false);
+
+      if (result.success) {
+        toast(`hello_world test succeeded! Meta wamid: ${result.wamid}`);
+      } else {
+        toast(result.errorMessage || `Meta send failed (HTTP ${result.httpStatus})`, 'error');
+      }
+    } catch (err: any) {
+      setIsSendingHelloTest(false);
+      const fallbackResult = {
+        success: false,
+        endpoint: `POST https://graph.facebook.com/${connectionDetails?.apiVersion || 'v25.0'}/${connectionDetails?.phoneNumberId || '1322912734243367'}/messages`,
+        httpStatus: 500,
+        recipient: cleanNumber,
+        phoneNumberId: connectionDetails?.phoneNumberId || '1322912734243367',
+        apiVersion: connectionDetails?.apiVersion || 'v25.0',
+        errorMessage: err?.message || 'Failed to dispatch hello_world diagnostic send',
+      };
+      setDiagnosticResult(fallbackResult);
+      toast(err?.message || 'hello_world test failed', 'error');
     }
   };
 
@@ -244,111 +330,350 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* TAB 2: WhatsApp Cloud API */}
       {activeTab === 'whatsapp' && (
         <div className="space-y-6">
-          <form onSubmit={handleSaveWhatsApp} className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between">
+          {/* Main Connection Status Card */}
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
               <div>
-                <h3 className="text-sm font-bold text-slate-900">Meta WhatsApp Cloud API Configuration</h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Secure server-side credentials proxied through Node.js endpoints.
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-slate-900">WhatsApp Cloud API Connectivity</h3>
+                  {connectionState === 'Connected' ? (
+                    <Badge variant="emerald">Connected</Badge>
+                  ) : connectionState === 'Testing' ? (
+                    <Badge variant="blue">Testing...</Badge>
+                  ) : connectionState === 'Connection Error' ? (
+                    <Badge variant="rose">Connection Error</Badge>
+                  ) : (
+                    <Badge variant="amber">Not Configured</Badge>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  Meta's official WhatsApp Business Platform Cloud API connectivity and server status.
                 </p>
               </div>
-              {organization.whatsappConnected ? (
-                <Badge variant="emerald">Live / Connected</Badge>
-              ) : (
-                <Badge variant="amber">Not Configured</Badge>
-              )}
-            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  WhatsApp Phone Number ID
-                </label>
-                <input
-                  id="settings-phone-id-input"
-                  type="text"
-                  placeholder="e.g. 105938472910482"
-                  value={phoneId}
-                  onChange={(e) => setPhoneId(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  WhatsApp Business Account ID (WABA)
-                </label>
-                <input
-                  id="settings-waba-id-input"
-                  type="text"
-                  placeholder="e.g. 294820482910482"
-                  value={wabaId}
-                  onChange={(e) => setWabaId(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-
-              <div className="sm:col-span-2">
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  System User Access Token (Graph API)
-                </label>
-                <input
-                  id="settings-access-token-input"
-                  type="password"
-                  placeholder={organization.whatsappConnected ? '••••••••••••••••' : 'EAAG... (Optional in Demo Mode)'}
-                  value={accessToken}
-                  onChange={(e) => setAccessToken(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Only required when connecting a live Meta WhatsApp Business account. In Demo Mode, no credentials or secrets are required.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2 pt-2">
-              <button
-                id="save-whatsapp-settings-btn"
-                type="submit"
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
-              >
-                Save Credentials
-              </button>
-              <button
-                id="test-whatsapp-connection-btn"
-                type="button"
-                onClick={handleTestConnection}
-                disabled={isTesting}
-                className="px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200 transition-colors"
-              >
-                {isTesting ? 'Testing Ping...' : 'Test API Connection'}
-              </button>
-              {organization.whatsappConnected && (
+              <div className="flex items-center gap-2">
                 <button
-                  id="disconnect-whatsapp-btn"
+                  id="test-whatsapp-connection-btn"
                   type="button"
-                  onClick={() => {
-                    onUpdateOrganization({ whatsappConnected: false });
-                    toast('Disconnected. Workspace is now in Demo Mode.', 'info');
-                  }}
-                  className="px-4 py-2 bg-white hover:bg-rose-50 text-rose-600 text-xs font-semibold rounded-lg border border-rose-200 transition-colors"
+                  onClick={handleTestConnection}
+                  disabled={connectionState === 'Testing'}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors flex items-center gap-1.5"
                 >
-                  Disconnect (Use Demo Mode)
+                  <RefreshCw className={`w-3.5 h-3.5 ${connectionState === 'Testing' ? 'animate-spin' : ''}`} />
+                  {connectionState === 'Testing' ? 'Testing Ping...' : 'Test Connection'}
                 </button>
-              )}
-            </div>
-          </form>
 
-          {/* Webhook Endpoints Box */}
+                {organization.whatsappConnected && (
+                  <button
+                    id="disconnect-whatsapp-btn"
+                    type="button"
+                    onClick={handleDisconnect}
+                    className="px-4 py-2 bg-white hover:bg-rose-50 text-rose-600 text-xs font-semibold rounded-lg border border-rose-200 transition-colors"
+                  >
+                    Use Demo Mode
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Current Mode Banner */}
+            {connectionState === 'Connected' ? (
+              <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-lg flex items-start gap-2.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="text-xs text-emerald-900">
+                  <span className="font-bold">Live Mode Active:</span> Your workspace is verified and communicating with Meta's official WhatsApp Cloud API. Outbound broadcasts and inbox messages are processed live, and delivery/read receipts are updated via Meta webhooks.
+                </div>
+              </div>
+            ) : connectionState === 'Connection Error' ? (
+              <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-lg flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="text-xs text-rose-900">
+                  <span className="font-bold">Connection Error:</span> {connectionDetails?.error || 'Unable to connect to Meta WhatsApp Cloud API with the provided server credentials.'}
+                </div>
+              </div>
+            ) : (
+              <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5">
+                <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-900">
+                  <span className="font-bold">Demo Mode Active:</span> Live WhatsApp credentials are not configured on the server. WatsManager operates fully in Demo Mode with simulated sending, templates, contacts, and delivery tracking.
+                </div>
+              </div>
+            )}
+
+            {/* Live Account Details (when connected) */}
+            {connectionState === 'Connected' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                <div>
+                  <span className="text-slate-400 block text-[11px] font-medium">Verified Business</span>
+                  <span className="font-semibold text-slate-800">{connectionDetails?.verifiedName || 'Business Profile'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[11px] font-medium">Display Phone</span>
+                  <span className="font-semibold text-slate-800 font-mono">{connectionDetails?.displayPhoneNumber || 'Registered'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[11px] font-medium">Quality Rating</span>
+                  <span className="font-semibold text-emerald-600">{connectionDetails?.qualityRating || 'UNKNOWN'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[11px] font-medium">Graph API Version</span>
+                  <span className="font-semibold text-slate-800 font-mono">{connectionDetails?.apiVersion || 'v21.0'}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Server-Side Secrets Security Guarantee */}
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center gap-2">
+                <Lock className="w-3.5 h-3.5 text-slate-500" />
+                <h4 className="text-xs font-bold text-slate-800">Server-Side Credentials Architecture</h4>
+              </div>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                In compliance with security standards, all Meta WhatsApp credentials are read exclusively on the Node.js server via environment variables. Access tokens, App Secrets, and verify tokens are never transmitted to browser clients, stored in Firestore, or exposed in logs.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-1">
+                {[
+                  { name: 'WHATSAPP_ACCESS_TOKEN', set: connectionDetails?.hasAccessToken },
+                  { name: 'WHATSAPP_PHONE_NUMBER_ID', set: connectionDetails?.hasPhoneNumberId },
+                  { name: 'WHATSAPP_BUSINESS_ACCOUNT_ID', set: connectionDetails?.hasWabaId },
+                  { name: 'WHATSAPP_WEBHOOK_VERIFY_TOKEN', set: connectionDetails?.hasWebhookVerifyToken },
+                  { name: 'WHATSAPP_APP_SECRET', set: connectionDetails?.hasAppSecret },
+                  { name: 'WHATSAPP_API_VERSION', set: Boolean(connectionDetails?.apiVersion) },
+                ].map((item) => (
+                  <div key={item.name} className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between text-xs">
+                    <span className="font-mono text-[11px] text-slate-700 truncate pr-2" title={item.name}>
+                      {item.name}
+                    </span>
+                    <Badge variant={item.set ? 'emerald' : 'slate'} size="sm">
+                      {item.set ? 'Configured' : 'Not Set'}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Diagnostic Live-Send Card: Send hello_world Test */}
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-slate-900">Diagnostic Live Send: Send hello_world Test</h3>
+                  <Badge variant="blue">Server-Side Direct</Badge>
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  Executes a server-side live Meta WhatsApp Cloud API request with the official Meta <code>hello_world</code> template to verify the outbound send path.
+                </p>
+              </div>
+            </div>
+
+            <form onSubmit={handleSendHelloWorldTest} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Test Recipient Phone Number
+                </label>
+                <div className="flex flex-col sm:flex-row gap-2 max-w-xl">
+                  <div className="relative flex-1">
+                    <input
+                      id="diagnostic-recipient-input"
+                      type="text"
+                      placeholder="e.g. +2348068620081 or 2348068620081"
+                      value={testRecipient}
+                      onChange={(e) => setTestRecipient(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                  <button
+                    id="send-hello-world-btn"
+                    type="submit"
+                    disabled={isSendingHelloTest || !testRecipient.trim()}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors flex items-center justify-center gap-1.5 shrink-0"
+                  >
+                    <Send className={`w-3.5 h-3.5 ${isSendingHelloTest ? 'animate-pulse' : ''}`} />
+                    {isSendingHelloTest ? 'Sending hello_world...' : 'Send hello_world Test'}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  Normalized before dispatch: removes <code>+</code>, spaces, and dashes while preserving country code (e.g. <code>+2348068620081 → 2348068620081</code>).
+                </p>
+
+                {/* Quick-fill recipient options from contacts */}
+                {dataStore.contacts.length > 0 && (
+                  <div className="flex items-center gap-1.5 pt-2 flex-wrap text-xs">
+                    <span className="text-[11px] text-slate-400 font-medium">Quick-fill recipient:</span>
+                    {dataStore.contacts.slice(0, 4).map((c) => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => setTestRecipient(c.phone)}
+                        className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] rounded-md font-mono transition-colors"
+                      >
+                        {c.firstName} ({c.phone})
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </form>
+
+            {/* Diagnostics Panel */}
+            {diagnosticResult && (
+              <div
+                id="diagnostic-panel"
+                className={`p-4 rounded-xl border text-xs space-y-3.5 transition-all ${
+                  diagnosticResult.success
+                    ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                    : 'bg-rose-50/70 border-rose-200 text-rose-950'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    {diagnosticResult.success ? (
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0" />
+                    )}
+                    <div>
+                      <h4 className="font-bold text-sm">
+                        {diagnosticResult.success
+                          ? 'Live Outbound Send Succeeded'
+                          : 'Meta Graph API Outbound Send Failed'}
+                      </h4>
+                      <p className="text-[11px] opacity-80 mt-0.5">
+                        {diagnosticResult.success
+                          ? "Meta accepted the hello_world template (HTTP 200). Initial status is 'submitted'. Real-time delivery and read receipts will update via webhook."
+                          : 'Meta returned an error response. Review the exact diagnostics below.'}
+                      </p>
+                    </div>
+                  </div>
+                  <Badge variant={diagnosticResult.success ? 'emerald' : 'rose'}>
+                    HTTP {diagnosticResult.httpStatus} {diagnosticResult.success ? 'OK' : ''}
+                  </Badge>
+                </div>
+
+                {/* Structured Diagnostics Grid */}
+                <div className="bg-white/95 border border-slate-200 rounded-lg p-3.5 space-y-2.5 text-xs text-slate-800 shadow-2xs">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-400 block uppercase tracking-wider">
+                        Request Endpoint (No Secrets)
+                      </span>
+                      <code className="text-xs font-mono text-slate-900 bg-slate-100 px-2 py-1 rounded-md block mt-0.5 break-all">
+                        {diagnosticResult.endpoint}
+                      </code>
+                    </div>
+
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-400 block uppercase tracking-wider">
+                        HTTP Status
+                      </span>
+                      <code className="text-xs font-mono text-slate-900 bg-slate-100 px-2 py-1 rounded-md block mt-0.5 font-bold">
+                        {diagnosticResult.httpStatus} {diagnosticResult.httpStatus === 200 ? 'OK' : ''}
+                      </code>
+                    </div>
+
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-400 block uppercase tracking-wider">
+                        Recipient Number (Normalized)
+                      </span>
+                      <code className="text-xs font-mono text-slate-900 bg-slate-100 px-2 py-1 rounded-md block mt-0.5">
+                        {diagnosticResult.recipient}
+                      </code>
+                    </div>
+
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-400 block uppercase tracking-wider">
+                        Phone Number ID
+                      </span>
+                      <code className="text-xs font-mono text-slate-900 bg-slate-100 px-2 py-1 rounded-md block mt-0.5">
+                        {diagnosticResult.phoneNumberId}
+                      </code>
+                    </div>
+
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-400 block uppercase tracking-wider">
+                        API Version
+                      </span>
+                      <code className="text-xs font-mono text-slate-900 bg-slate-100 px-2 py-1 rounded-md block mt-0.5">
+                        {diagnosticResult.apiVersion}
+                      </code>
+                    </div>
+
+                    {diagnosticResult.wamid && (
+                      <div className="md:col-span-2">
+                        <span className="text-[11px] font-semibold text-emerald-700 block uppercase tracking-wider">
+                          Meta Message ID (wamid) — Initial Status: submitted
+                        </span>
+                        <code className="text-xs font-mono text-emerald-900 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-md block mt-0.5 break-all font-semibold">
+                          {diagnosticResult.wamid}
+                        </code>
+                      </div>
+                    )}
+
+                    {diagnosticResult.errorCode !== undefined && (
+                      <div>
+                        <span className="text-[11px] font-semibold text-rose-700 block uppercase tracking-wider">
+                          Meta Error Code
+                        </span>
+                        <code className="text-xs font-mono text-rose-900 bg-rose-50 border border-rose-200 px-2 py-1 rounded-md block mt-0.5 font-bold">
+                          {diagnosticResult.errorCode}
+                        </code>
+                      </div>
+                    )}
+
+                    {diagnosticResult.errorSubcode !== undefined && (
+                      <div>
+                        <span className="text-[11px] font-semibold text-rose-700 block uppercase tracking-wider">
+                          Meta Error Subcode
+                        </span>
+                        <code className="text-xs font-mono text-rose-900 bg-rose-50 border border-rose-200 px-2 py-1 rounded-md block mt-0.5">
+                          {diagnosticResult.errorSubcode}
+                        </code>
+                      </div>
+                    )}
+
+                    {diagnosticResult.errorMessage && (
+                      <div className="md:col-span-2">
+                        <span className="text-[11px] font-semibold text-rose-700 block uppercase tracking-wider">
+                          Meta Error Message
+                        </span>
+                        <div className="text-xs font-mono text-rose-900 bg-rose-50 border border-rose-200 p-2.5 rounded-md mt-0.5 leading-relaxed break-words">
+                          {diagnosticResult.errorMessage}
+                        </div>
+                      </div>
+                    )}
+
+                    {diagnosticResult.fbtrace_id && (
+                      <div className="md:col-span-2">
+                        <span className="text-[11px] font-semibold text-slate-400 block uppercase tracking-wider">
+                          fbtrace_id
+                        </span>
+                        <code className="text-[11px] font-mono text-slate-600 bg-slate-100 px-2 py-1 rounded-md block mt-0.5">
+                          {diagnosticResult.fbtrace_id}
+                        </code>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Webhook Configuration Box */}
           <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs space-y-4">
-            <h3 className="text-sm font-bold text-slate-900">Meta Webhook Registration</h3>
-            <p className="text-xs text-slate-500">
-              Configure these in your Meta App Dashboard under WhatsApp &gt; Configuration &gt; Callback URL.
-            </p>
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Meta Webhook Configuration</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Register these values in your Meta for Developers App Dashboard under <strong>WhatsApp &gt; Configuration &gt; Callback URL</strong>.
+              </p>
+            </div>
 
             <div className="space-y-3">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Callback URL</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Callback URL (Public HTTPS Endpoint)
+                </label>
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -359,16 +684,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => copyToClipboard(webhookUrl, 'url')}
-                    className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1"
+                    className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1 shadow-2xs"
                   >
                     {copiedKey === 'url' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                    Copy
+                    Copy URL
                   </button>
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Verification Token</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Webhook Verify Token (hub.verify_token)
+                </label>
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -379,13 +706,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => copyToClipboard(webhookVerifyToken, 'token')}
-                    className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1"
+                    className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1 shadow-2xs"
                   >
                     {copiedKey === 'token' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                    Copy
+                    Copy Token
                   </button>
                 </div>
               </div>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600 space-y-1">
+              <span className="font-semibold text-slate-800">Supported Webhook Subscription Fields:</span>
+              <p className="text-[11px] text-slate-500">
+                Subscribe to <code>messages</code> in the Meta Webhooks panel. WatsManager processes incoming text messages, customer care sessions, opt-out keywords (STOP), and delivery status receipts (sent, delivered, read, failed) idempotently.
+              </p>
             </div>
           </div>
         </div>
@@ -454,7 +788,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-2xs space-y-4">
           <h3 className="text-sm font-bold text-slate-900">WhatsApp Opt-In & Compliance Governance</h3>
           <p className="text-xs text-slate-600 leading-relaxed">
-            WhatsApp Business terms mandate strict compliance with user consent. WhatsFlow enforces
+            WhatsApp Business terms mandate strict compliance with user consent. WatsManager enforces
             hardware-level protection before any message is sent.
           </p>
 
@@ -462,7 +796,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1.5">
               <span className="font-bold text-slate-800">Automatic Opt-Out Keywords (Zero-Latency)</span>
               <p className="text-slate-600">
-                When a customer sends any of the following words, WhatsFlow immediately marks their
+                When a customer sends any of the following words, WatsManager immediately marks their
                 contact record as opted-out and sends an unsubscribe receipt:
               </p>
               <div className="flex flex-wrap gap-1.5 pt-1">

@@ -6,7 +6,8 @@ import {
   Clock, 
   AlertCircle, 
   Copy, 
-  ExternalLink 
+  ExternalLink,
+  RefreshCw
 } from 'lucide-react';
 import { MessageTemplate } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
@@ -17,14 +18,19 @@ import { useToast } from '../common/Toast.tsx';
 export interface TemplatesViewProps {
   templates: MessageTemplate[];
   onAddTemplate: (data: any) => void;
+  onSyncMetaTemplates?: () => Promise<any>;
+  isWhatsAppConnected?: boolean;
 }
 
 export const TemplatesView: React.FC<TemplatesViewProps> = ({
   templates,
   onAddTemplate,
+  onSyncMetaTemplates,
+  isWhatsAppConnected = false,
 }) => {
   const { toast } = useToast();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState('ALL');
 
   const filteredTemplates = templates.filter((t) => {
@@ -35,6 +41,23 @@ export const TemplatesView: React.FC<TemplatesViewProps> = ({
   const copyId = (text: string) => {
     navigator.clipboard.writeText(text);
     toast('Template identifier copied to clipboard');
+  };
+
+  const handleSyncMeta = async () => {
+    if (!onSyncMetaTemplates) return;
+    setIsSyncing(true);
+    try {
+      const res = await onSyncMetaTemplates();
+      setIsSyncing(false);
+      if (res && res.success) {
+        toast(`Synchronized ${res.count} template(s) from WhatsApp Business Account.`);
+      } else {
+        toast(res?.error || 'Failed to sync templates from Meta.', 'error');
+      }
+    } catch (err: any) {
+      setIsSyncing(false);
+      toast(err.message || 'Sync error', 'error');
+    }
   };
 
   return (
@@ -48,15 +71,30 @@ export const TemplatesView: React.FC<TemplatesViewProps> = ({
           </p>
         </div>
 
-        <button
-          id="open-create-template-btn"
-          type="button"
-          onClick={() => setIsModalOpen(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Create Template
-        </button>
+        <div className="flex items-center gap-2">
+          {onSyncMetaTemplates && (
+            <button
+              id="sync-meta-templates-btn"
+              type="button"
+              onClick={handleSyncMeta}
+              disabled={isSyncing}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-lg border border-emerald-200 shadow-2xs transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+              {isSyncing ? 'Syncing Templates...' : 'Sync Templates from Meta'}
+            </button>
+          )}
+
+          <button
+            id="open-create-template-btn"
+            type="button"
+            onClick={() => setIsModalOpen(true)}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Create Template
+          </button>
+        </div>
       </div>
 
       {/* Meta Guidelines Banner */}
@@ -98,7 +136,7 @@ export const TemplatesView: React.FC<TemplatesViewProps> = ({
                 <div className="flex items-start justify-between gap-2 mb-2">
                   <div>
                     <h3 className="text-xs font-bold text-slate-900 font-mono">{tpl.name}</h3>
-                    <div className="flex items-center gap-1.5 mt-1">
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1">
                       <Badge variant="blue" size="sm">
                         {tpl.category}
                       </Badge>
@@ -114,6 +152,15 @@ export const TemplatesView: React.FC<TemplatesViewProps> = ({
                       >
                         {tpl.status}
                       </Badge>
+                      {tpl.isLiveMeta || (!tpl.isDemo && tpl.name === 'hello_world') ? (
+                        <Badge variant="emerald" size="sm">
+                          Meta Live Template
+                        </Badge>
+                      ) : (
+                        <Badge variant="slate" size="sm">
+                          Demo/Local Template
+                        </Badge>
+                      )}
                     </div>
                   </div>
                   <button

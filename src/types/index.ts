@@ -100,6 +100,7 @@ export interface MessageTemplate {
   createdAt: string;
   updatedAt: string;
   isDemo?: boolean;
+  isLiveMeta?: boolean;
 }
 
 export type CampaignStatus = 
@@ -193,13 +194,14 @@ export interface Conversation {
 
 export type MessageDirection = 'incoming' | 'outgoing';
 export type MessageSenderType = 'customer' | 'agent' | 'automation' | 'broadcast';
-export type MessageDeliveryStatus = 'Sending' | 'Sent' | 'Delivered' | 'Read' | 'Failed';
+export type MessageDeliveryStatus = 'submitted' | 'Sending' | 'Sent' | 'Delivered' | 'Read' | 'Failed';
 
 export interface Message {
   id: string;
   conversationId: string;
   organizationId: string;
   contactId: string;
+  recipient?: string;
   direction: MessageDirection;
   senderType: MessageSenderType;
   body: string;
@@ -208,6 +210,7 @@ export interface Message {
   status: MessageDeliveryStatus;
   failureReason?: string;
   whatsappMessageId?: string;
+  submittedAt?: string;
   timestamp: string;
   createdAt: string;
   isDemo?: boolean;

@@ -34,6 +34,10 @@ class DataStore {
   private orgId: string = 'default_org';
   private initialized: boolean = false;
   private listeners: Set<() => void> = new Set();
+  private lastEventSyncTimestamp: string = new Date().toISOString();
+  private eventSyncTimer: any = null;
+
+  serverWhatsAppStatus: 'Not Configured' | 'Testing' | 'Connected' | 'Connection Error' = 'Not Configured';
 
   contacts: Contact[] = [];
   groups: ContactGroup[] = [];
@@ -114,11 +118,330 @@ class DataStore {
       this.seedData(organizationId);
     }
 
+    // Ensure official Meta hello_world template is available and marked isLiveMeta
+    const hwIdx = this.templates.findIndex((t) => t.name === 'hello_world');
+    if (hwIdx >= 0) {
+      this.templates[hwIdx].isLiveMeta = true;
+      this.templates[hwIdx].isDemo = false;
+      this.templates[hwIdx].status = 'Approved';
+    } else {
+      this.templates.unshift({
+        id: `tpl_hello_world_${organizationId}`,
+        organizationId,
+        name: 'hello_world',
+        language: 'en_US',
+        category: 'Utility',
+        status: 'Approved',
+        header: 'Official Meta Template',
+        body: 'Hello World',
+        variables: [],
+        whatsappTemplateId: 'meta_hello_world',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isDemo: false,
+        isLiveMeta: true,
+      });
+    }
+
+    // Ensure verified test recipient +2348068620081 is present for testing
+    let testContact = this.contacts.find((c) => arePhoneNumbersEqual(c.phone, '+2348068620081'));
+    if (!testContact) {
+      testContact = {
+        id: `cnt_verified_test_${organizationId}`,
+        organizationId,
+        firstName: 'Verified Test',
+        lastName: 'Recipient',
+        phone: '+2348068620081',
+        email: 'verified.test@watsmanager.io',
+        company: 'Meta Test Number',
+        tags: ['Verified Test', 'Meta Sandbox'],
+        groups: ['Customers', 'VIP'],
+        whatsappOptIn: true,
+        marketingOptIn: true,
+        transactionalOptIn: true,
+        optInDate: new Date().toISOString(),
+        optInSource: 'Meta Developer Dashboard',
+        optOut: false,
+        status: 'Active',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isDemo: false,
+      };
+      this.contacts.unshift(testContact);
+    }
+
+    let testConv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, '+2348068620081'));
+    if (!testConv) {
+      const past25Hours = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+      testConv = {
+        id: `cnv_verified_test_${organizationId}`,
+        organizationId,
+        contactId: testContact.id,
+        contactPhone: '+2348068620081',
+        contactName: 'Verified Test Recipient',
+        lastMessage: 'Ready for Meta Live Test',
+        lastMessageAt: past25Hours,
+        lastIncomingMessageAt: past25Hours,
+        unreadCount: 0,
+        status: 'Open',
+        createdAt: past25Hours,
+        isDemo: false,
+      };
+      this.conversations.unshift(testConv);
+    }
+    this.saveLocal();
+
     this.initialized = true;
     this.notify();
 
+    // Start background webhook event polling and rules synchronization
+    this.startEventPolling();
+    this.syncAutomationRulesToServer();
+    this.checkServerWhatsAppStatus();
+
     // Async sync with Firestore in background if online
     this.syncFromFirestore().catch(() => {});
+  }
+
+  async checkServerWhatsAppStatus(): Promise<string> {
+    try {
+      const res = await fetch('/api/whatsapp/status');
+      if (res.ok) {
+        const data = await res.json();
+        this.serverWhatsAppStatus = data.status || (data.configured ? 'Connected' : 'Not Configured');
+        this.notify();
+        return this.serverWhatsAppStatus;
+      }
+    } catch {}
+    return 'Not Configured';
+  }
+
+  startEventPolling() {
+    if (this.eventSyncTimer) return;
+    this.pollEvents();
+    this.eventSyncTimer = setInterval(() => {
+      this.pollEvents();
+    }, 3000);
+  }
+
+  stopEventPolling() {
+    if (this.eventSyncTimer) {
+      clearInterval(this.eventSyncTimer);
+      this.eventSyncTimer = null;
+    }
+  }
+
+  private async pollEvents() {
+    try {
+      const res = await fetch(`/api/whatsapp/events?since=${encodeURIComponent(this.lastEventSyncTimestamp)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.success || !Array.isArray(data.events) || data.events.length === 0) return;
+
+      let changed = false;
+
+      for (const event of data.events) {
+        if (event.timestamp > this.lastEventSyncTimestamp) {
+          this.lastEventSyncTimestamp = event.timestamp;
+        }
+
+        if (event.type === 'status_update') {
+          const { wamid, status, failureReason, eventTimestamp } = event.payload;
+
+          // 1. Update matching message
+          const msg = this.messages.find((m) => m.whatsappMessageId === wamid);
+          if (msg) {
+            const mappedStatus: Message['status'] =
+              status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : status === 'failed' ? 'Failed' : 'Sent';
+            if (msg.status !== 'Read' || mappedStatus === 'Read') {
+              msg.status = mappedStatus;
+              if (failureReason) msg.failureReason = failureReason;
+              changed = true;
+            }
+          }
+
+          // 2. Update matching campaign recipient
+          const rcp = this.campaignRecipients.find((r) => r.whatsappMessageId === wamid);
+          if (rcp) {
+            if (rcp.status !== 'read' || status === 'read') {
+              rcp.status = status;
+              if (status === 'delivered') rcp.deliveredAt = eventTimestamp;
+              if (status === 'read') rcp.readAt = eventTimestamp;
+              if (status === 'failed') {
+                rcp.failedAt = eventTimestamp;
+                rcp.failureReason = failureReason;
+              }
+              changed = true;
+
+              // Recompute campaign aggregates
+              const cmp = this.campaigns.find((c) => c.id === rcp.campaignId);
+              if (cmp) {
+                const recs = this.campaignRecipients.filter((r) => r.campaignId === cmp.id);
+                cmp.deliveredCount = recs.filter((r) => r.status === 'delivered' || r.status === 'read').length;
+                cmp.readCount = recs.filter((r) => r.status === 'read').length;
+                cmp.failedCount = recs.filter((r) => r.status === 'failed').length;
+              }
+            }
+          }
+        } else if (event.type === 'incoming_message') {
+          const { wamid, fromPhone, text, profileName, timestamp, consentEvaluation, autoReplySent } = event.payload;
+
+          if (this.messages.some((m) => m.whatsappMessageId === wamid)) {
+            continue;
+          }
+
+          let contact = this.contacts.find((c) => arePhoneNumbersEqual(c.phone, fromPhone));
+          if (!contact) {
+            contact = this.addContact({
+              firstName: profileName || 'WhatsApp',
+              lastName: profileName ? '' : 'Contact',
+              phone: fromPhone,
+              email: '',
+              company: '',
+              tags: ['Live Inbound'],
+              groups: [],
+              whatsappOptIn: false,
+              marketingOptIn: false,
+              transactionalOptIn: false,
+              optOut: false,
+              status: 'Active',
+            });
+          }
+
+          let conv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, fromPhone));
+          if (!conv) {
+            conv = {
+              id: `cnv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              organizationId: this.orgId,
+              contactId: contact.id,
+              contactPhone: fromPhone,
+              contactName: `${contact.firstName} ${contact.lastName}`.trim() || fromPhone,
+              lastMessage: text,
+              lastMessageAt: timestamp,
+              lastIncomingMessageAt: timestamp,
+              unreadCount: 1,
+              status: 'Open',
+              createdAt: timestamp,
+            };
+            this.conversations.unshift(conv);
+          } else {
+            conv.lastMessage = text;
+            conv.lastMessageAt = timestamp;
+            conv.lastIncomingMessageAt = timestamp;
+            conv.unreadCount = (conv.unreadCount || 0) + 1;
+            conv.status = 'Open';
+          }
+
+          const inMsg: Message = {
+            id: `msg_wamid_${wamid.replace(/[^a-zA-Z0-9]/g, '_')}`,
+            conversationId: conv.id,
+            organizationId: this.orgId,
+            contactId: contact.id,
+            direction: 'incoming',
+            senderType: 'customer',
+            messageType: 'text',
+            body: text,
+            status: 'Delivered',
+            whatsappMessageId: wamid,
+            timestamp,
+            createdAt: timestamp,
+            isDemo: false,
+          };
+          this.messages.push(inMsg);
+          changed = true;
+
+          if (consentEvaluation?.isOptOutCommand) {
+            this.updateContact(contact.id, {
+              optOut: true,
+              status: 'Opted Out',
+              optOutDate: timestamp,
+              optOutSource: 'WhatsApp Inbound STOP Command',
+            });
+            this.logConsentChange({
+              contactId: contact.id,
+              phone: contact.phone,
+              previousStatus: 'Active',
+              newStatus: 'Opted Out',
+              source: 'WhatsApp Inbound STOP Command',
+              notes: text,
+            });
+          }
+
+          if (autoReplySent) {
+            const outMsg: Message = {
+              id: `msg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              conversationId: conv.id,
+              organizationId: this.orgId,
+              contactId: contact.id,
+              direction: 'outgoing',
+              senderType: 'automation',
+              messageType: 'text',
+              body: autoReplySent,
+              status: 'Sent',
+              timestamp: new Date().toISOString(),
+              createdAt: new Date().toISOString(),
+              isDemo: false,
+            };
+            this.messages.push(outMsg);
+            conv.lastMessage = autoReplySent;
+            conv.lastMessageAt = outMsg.timestamp;
+            conv.lastOutgoingMessageAt = outMsg.timestamp;
+          }
+        }
+      }
+
+      if (changed) {
+        this.notify();
+      }
+    } catch {
+      // Background poll silently catches transient fetch errors
+    }
+  }
+
+  async syncAutomationRulesToServer() {
+    try {
+      await fetch('/api/whatsapp/sync-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules: this.automationRules }),
+      });
+    } catch {}
+  }
+
+  async syncTemplatesFromMeta(): Promise<{ success: boolean; count: number; error?: string }> {
+    try {
+      const res = await fetch('/api/whatsapp/sync-templates');
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, count: 0, error: data.error || 'Failed to fetch templates from Meta' };
+      }
+
+      const metaTemplates: MessageTemplate[] = data.templates || [];
+      if (metaTemplates.length === 0) {
+        return { success: true, count: 0 };
+      }
+
+      for (const tpl of metaTemplates) {
+        const existingIdx = this.templates.findIndex(
+          (t) => t.whatsappTemplateId === tpl.whatsappTemplateId || t.name === tpl.name
+        );
+        const metaTpl: MessageTemplate = {
+          ...tpl,
+          isLiveMeta: true,
+          isDemo: false,
+        };
+        if (existingIdx >= 0) {
+          this.templates[existingIdx] = { ...this.templates[existingIdx], ...metaTpl };
+        } else {
+          this.templates.unshift(metaTpl);
+        }
+      }
+
+      this.notify();
+      return { success: true, count: metaTemplates.length };
+    } catch (err: any) {
+      return { success: false, count: 0, error: err?.message || 'Network error syncing templates' };
+    }
   }
 
   private async syncFromFirestore() {
@@ -558,6 +881,146 @@ class DataStore {
     const campaignId = `cmp_${Date.now()}`;
     const isDemoMode = data.isDemo !== false;
 
+    if (!isDemoMode) {
+      // LIVE MODE: Send approved templates through server-side Cloud API
+      const isApproved = (template.status || '').toUpperCase() === 'APPROVED';
+      if (!isApproved) {
+        throw new Error(
+          `Template "${template.name}" is "${template.status}". In Live Mode, Meta WhatsApp Cloud API requires APPROVED templates.`
+        );
+      }
+
+      const res = await fetch('/api/whatsapp/send-broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          campaignName: data.name,
+          template,
+          recipients: deduplicatedAudience,
+          variableMapping: data.variableMapping || {},
+          variableFallbacks: data.variableFallbacks || {},
+          isLiveMode: true,
+        }),
+      });
+
+      const serverRes = await res.json();
+      if (!res.ok || !serverRes.success) {
+        throw new Error(serverRes.error || 'Server failed to process live broadcast dispatch');
+      }
+
+      const summary = serverRes.summary;
+      const returnedRecipients: any[] = serverRes.recipients || [];
+
+      const liveCampaign: Campaign = {
+        id: campaignId,
+        organizationId: this.orgId,
+        name: data.name,
+        campaignType,
+        templateId: template.id,
+        templateName: template.name,
+        templateCategory: template.category,
+        templateBody: template.body,
+        audienceType: data.audienceType,
+        targetGroups: data.targetGroups,
+        targetContacts: data.targetContacts,
+        totalSelected: deduplicatedAudience.length,
+        eligibleCount: summary.eligibleProcessed,
+        excludedCount: summary.skipped,
+        sentCount: summary.sent,
+        deliveredCount: 0, // In Live Mode, NEVER simulate delivery!
+        readCount: 0, // In Live Mode, NEVER simulate read!
+        failedCount: summary.failed,
+        status: summary.failed === 0 ? 'Completed' : 'Partially Completed',
+        variableMapping: data.variableMapping || {},
+        variableFallbacks: data.variableFallbacks || {},
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        isDemo: false,
+      };
+
+      returnedRecipients.forEach((rcp, idx) => {
+        const recipientRecord: CampaignRecipient = {
+          id: `rcp_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+          campaignId,
+          organizationId: this.orgId,
+          contactId: rcp.contactId,
+          phone: rcp.phone,
+          normalizedPhone: rcp.normalizedPhone,
+          contactName: rcp.contactName,
+          templateId: template.id,
+          templateName: template.name,
+          templateBody: template.body,
+          renderedBody: rcp.personalizedBody,
+          personalizedBody: rcp.personalizedBody,
+          variableValues: rcp.variableValues,
+          whatsappMessageId: rcp.whatsappMessageId,
+          status: rcp.status,
+          failureReason: rcp.failureReason,
+          sentAt: rcp.sentAt,
+        };
+        this.campaignRecipients.unshift(recipientRecord);
+
+        if (rcp.status === 'sent') {
+          let conv = this.conversations.find(
+            (cnv) => cnv.contactPhone === rcp.phone || arePhoneNumbersEqual(cnv.contactPhone, rcp.phone)
+          );
+          if (!conv) {
+            conv = {
+              id: `cnv_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+              organizationId: this.orgId,
+              contactId: rcp.contactId,
+              contactPhone: rcp.phone,
+              contactName: rcp.contactName,
+              lastMessage: rcp.personalizedBody,
+              lastMessageAt: new Date().toISOString(),
+              lastOutgoingMessageAt: new Date().toISOString(),
+              unreadCount: 0,
+              status: 'Closed',
+              createdAt: new Date().toISOString(),
+            };
+            this.conversations.unshift(conv);
+          } else {
+            conv.lastMessage = rcp.personalizedBody;
+            conv.lastMessageAt = new Date().toISOString();
+            conv.lastOutgoingMessageAt = new Date().toISOString();
+          }
+
+          const msg: Message = {
+            id: `msg_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+            conversationId: conv.id,
+            organizationId: this.orgId,
+            contactId: rcp.contactId,
+            direction: 'outgoing',
+            senderType: 'broadcast',
+            messageType: 'template',
+            templateName: template.name,
+            body: rcp.personalizedBody,
+            status: 'Sent',
+            whatsappMessageId: rcp.whatsappMessageId,
+            timestamp: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+            isDemo: false,
+          };
+          this.messages.push(msg);
+        }
+      });
+
+      this.campaigns.unshift(liveCampaign);
+      this.logAudit('Live Campaign Dispatched', 'Campaign', campaignId, {
+        name: liveCampaign.name,
+        type: campaignType,
+        template: template.name,
+        sent: summary.sent,
+        failed: summary.failed,
+        skipped: summary.skipped,
+        mode: 'Live WhatsApp Cloud API',
+      });
+
+      this.notify();
+      this.persistDoc('campaigns', campaignId, liveCampaign);
+      return { campaign: liveCampaign, summary };
+    }
+
     const campaign: Campaign = {
       id: campaignId,
       organizationId: this.orgId,
@@ -692,58 +1155,332 @@ class DataStore {
   }
 
   // ================= CONVERSATIONS & INBOX =================
-  async sendManualMessage(conversationId: string, text: string): Promise<Message> {
+  async sendManualMessage(conversationId: string, text: string, isLiveMode?: boolean): Promise<Message> {
     const conv = this.conversations.find((c) => c.id === conversationId);
     if (!conv) throw new Error('Conversation not found');
 
-    const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const msg: Message = {
-      id: msgId,
-      conversationId,
-      organizationId: this.orgId,
-      contactId: conv.contactId,
-      direction: 'outgoing',
-      senderType: 'agent',
-      messageType: 'text',
-      body: text,
-      status: 'Sending',
-      timestamp: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-    };
+    const cleanPhone = (conv.contactPhone || '').replace(/\D/g, '');
+    if (!cleanPhone) throw new Error('Conversation contact has no valid phone number');
 
-    this.messages.push(msg);
-    conv.lastMessage = text;
-    conv.lastMessageAt = new Date().toISOString();
-    conv.lastOutgoingMessageAt = new Date().toISOString();
-    this.notify();
+    // Enforce 24h customer window in Live Mode
+    if (isLiveMode) {
+      const lastIncoming = conv.lastIncomingMessageAt ? new Date(conv.lastIncomingMessageAt).getTime() : 0;
+      const isWindowOpen = Date.now() - lastIncoming < 24 * 60 * 60 * 1000;
+      if (!isWindowOpen) {
+        throw new Error(
+          'Outside 24-hour customer service window: Meta WhatsApp Cloud API requires sending an approved template to message customers after 24 hours of inactivity.'
+        );
+      }
+    }
 
-    // Call server to send via WhatsApp Cloud API
-    try {
+    if (isLiveMode) {
+      // LIVE MODE: Do NOT create message locally until Meta returns success and wamid
       const response = await fetch('/api/whatsapp/send-message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: conv.contactPhone,
+          to: cleanPhone,
           messageType: 'text',
           body: text,
         }),
       });
-      const res = await response.json();
-      if (res.success) {
-        msg.status = 'Sent';
-        msg.whatsappMessageId = res.messageId;
-      } else {
-        msg.status = 'Failed';
-        msg.failureReason = res.error || 'Meta API error';
+
+      const res = await response.json().catch(() => ({}));
+      if (!res || !res.success || !res.messageId) {
+        throw new Error(res?.error || 'Meta WhatsApp Cloud API rejected message');
       }
-    } catch (err: any) {
-      msg.status = 'Delivered'; // mock deliver
+
+      const now = new Date().toISOString();
+      const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const msg: Message = {
+        id: msgId,
+        conversationId,
+        organizationId: this.orgId,
+        contactId: conv.contactId,
+        recipient: cleanPhone,
+        direction: 'outgoing',
+        senderType: 'agent',
+        messageType: 'text',
+        body: text,
+        status: 'submitted', // Must be submitted initially; delivery/read updated via webhooks
+        whatsappMessageId: res.messageId,
+        submittedAt: now,
+        timestamp: now,
+        createdAt: now,
+        isDemo: false,
+      };
+
+      this.messages.push(msg);
+      conv.lastMessage = text;
+      conv.lastMessageAt = now;
+      conv.lastOutgoingMessageAt = now;
+      this.notify();
+      this.persistDoc('messages', msgId, msg);
+      this.persistDoc('conversations', conv.id, conv);
+      return msg;
+    } else {
+      // DEMO MODE: Simulate sending
+      const now = new Date().toISOString();
+      const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const mockWamid = `wamid.demo.${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+      const msg: Message = {
+        id: msgId,
+        conversationId,
+        organizationId: this.orgId,
+        contactId: conv.contactId,
+        recipient: cleanPhone,
+        direction: 'outgoing',
+        senderType: 'agent',
+        messageType: 'text',
+        body: text,
+        status: 'Sent',
+        whatsappMessageId: mockWamid,
+        submittedAt: now,
+        timestamp: now,
+        createdAt: now,
+        isDemo: true,
+      };
+
+      this.messages.push(msg);
+      conv.lastMessage = text;
+      conv.lastMessageAt = now;
+      conv.lastOutgoingMessageAt = now;
+      this.notify();
+      this.persistDoc('messages', msgId, msg);
+      this.persistDoc('conversations', conv.id, conv);
+      return msg;
+    }
+  }
+
+  async sendManualTemplateMessage(
+    conversationId: string,
+    template: MessageTemplate,
+    variables?: Record<string, string>,
+    isLiveMode?: boolean
+  ): Promise<Message> {
+    const conv = this.conversations.find((c) => c.id === conversationId);
+    if (!conv) throw new Error('Conversation not found');
+
+    const cleanPhone = (conv.contactPhone || '').replace(/\D/g, '');
+    if (!cleanPhone) throw new Error('Conversation contact has no valid phone number');
+
+    const isApproved = (template.status || '').toUpperCase() === 'APPROVED';
+    if (!isApproved) {
+      throw new Error(`Template "${template.name}" is ${template.status}. Only APPROVED templates can be sent.`);
     }
 
-    this.notify();
-    this.persistDoc('messages', msgId, msg);
-    this.persistDoc('conversations', conv.id, conv);
-    return msg;
+    if (isLiveMode && template.isDemo && !template.isLiveMeta && template.name !== 'hello_world') {
+      throw new Error(
+        `Template "${template.name}" is a demo template. In Live Mode, only Meta Live Templates synchronized from Meta can be dispatched.`
+      );
+    }
+
+    let rendered = template.body || '';
+    if (variables) {
+      for (const [k, v] of Object.entries(variables)) {
+        rendered = rendered.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), v);
+      }
+    }
+
+    const templateParameters = variables
+      ? Object.keys(variables)
+          .sort((a, b) => Number(a) - Number(b))
+          .map((num) => ({
+            type: 'text' as const,
+            text: variables[num] || '',
+          }))
+      : undefined;
+
+    const components =
+      templateParameters && templateParameters.length > 0
+        ? [
+            {
+              type: 'body' as const,
+              parameters: templateParameters,
+            },
+          ]
+        : undefined;
+
+    if (isLiveMode) {
+      // LIVE MODE: Call server WhatsApp service. Do not create fake local message beforehand.
+      const response = await fetch('/api/whatsapp/send-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: cleanPhone,
+          messageType: 'template',
+          templateName: template.name,
+          languageCode: template.language || 'en_US',
+          components,
+        }),
+      });
+
+      const res = await response.json().catch(() => ({}));
+      if (!res || !res.success || !res.messageId) {
+        throw new Error(res?.error || 'Meta WhatsApp Cloud API rejected template message');
+      }
+
+      const now = new Date().toISOString();
+      const msgId = `msg_tpl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const msg: Message = {
+        id: msgId,
+        conversationId,
+        organizationId: this.orgId,
+        contactId: conv.contactId,
+        recipient: cleanPhone,
+        direction: 'outgoing',
+        senderType: 'agent',
+        messageType: 'template',
+        templateName: template.name,
+        body: rendered,
+        status: 'submitted', // Stored as 'submitted'; webhooks update to delivered/read/failed
+        whatsappMessageId: res.messageId,
+        submittedAt: now,
+        timestamp: now,
+        createdAt: now,
+        isDemo: false,
+      };
+
+      this.messages.push(msg);
+      conv.lastMessage = rendered;
+      conv.lastMessageAt = now;
+      conv.lastOutgoingMessageAt = now;
+      this.notify();
+      this.persistDoc('messages', msgId, msg);
+      this.persistDoc('conversations', conv.id, conv);
+      return msg;
+    } else {
+      // DEMO MODE: Simulate sending
+      const now = new Date().toISOString();
+      const msgId = `msg_tpl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const mockWamid = `wamid.demo.template.${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+      const msg: Message = {
+        id: msgId,
+        conversationId,
+        organizationId: this.orgId,
+        contactId: conv.contactId,
+        recipient: cleanPhone,
+        direction: 'outgoing',
+        senderType: 'agent',
+        messageType: 'template',
+        templateName: template.name,
+        body: rendered,
+        status: 'Sent',
+        whatsappMessageId: mockWamid,
+        submittedAt: now,
+        timestamp: now,
+        createdAt: now,
+        isDemo: true,
+      };
+
+      this.messages.push(msg);
+      conv.lastMessage = rendered;
+      conv.lastMessageAt = now;
+      conv.lastOutgoingMessageAt = now;
+      this.notify();
+      this.persistDoc('messages', msgId, msg);
+      this.persistDoc('conversations', conv.id, conv);
+      return msg;
+    }
+  }
+
+  /**
+   * Diagnostic live-send function for Settings -> WhatsApp Cloud API.
+   * Sends the official Meta hello_world template and records the outgoing message if successful.
+   */
+  async sendDiagnosticHelloWorld(recipientPhone: string): Promise<any> {
+    const normRecipient = (recipientPhone || '').replace(/\D/g, '');
+    if (!normRecipient) {
+      throw new Error('Recipient phone number is required and must contain digits.');
+    }
+
+    const res = await fetch('/api/whatsapp/test-send-hello-world', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipientPhone: normRecipient }),
+    });
+
+    const data = await res.json().catch(() => ({
+      success: false,
+      httpStatus: res.status,
+      errorMessage: 'Invalid JSON response from server',
+    }));
+
+    if (data.success && data.wamid) {
+      // 1. Store returned wamid
+      // 2. Create / update outgoing message record with initial status 'submitted'
+      // Do not mark Delivered or Read until webhook status events are received.
+      let contact = this.contacts.find((c) => arePhoneNumbersEqual(c.phone, normRecipient));
+      if (!contact) {
+        contact = this.addContact({
+          firstName: 'WhatsApp',
+          lastName: 'Contact',
+          phone: `+${normRecipient}`,
+          email: '',
+          company: '',
+          tags: ['Diagnostic Test'],
+          groups: [],
+          whatsappOptIn: true,
+          marketingOptIn: false,
+          transactionalOptIn: true,
+          optOut: false,
+          status: 'Active',
+        });
+      }
+
+      let conv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, normRecipient));
+      const now = new Date().toISOString();
+      if (!conv) {
+        conv = {
+          id: `cnv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          organizationId: this.orgId,
+          contactId: contact.id,
+          contactPhone: `+${normRecipient}`,
+          contactName: `${contact.firstName} ${contact.lastName}`.trim() || `+${normRecipient}`,
+          lastMessage: 'hello_world (Meta Template)',
+          lastMessageAt: now,
+          lastOutgoingMessageAt: now,
+          unreadCount: 0,
+          status: 'Open',
+          createdAt: now,
+        };
+        this.conversations.unshift(conv);
+      } else {
+        conv.lastMessage = 'hello_world (Meta Template)';
+        conv.lastMessageAt = now;
+        conv.lastOutgoingMessageAt = now;
+      }
+
+      const msg: Message = {
+        id: `msg_hello_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        conversationId: conv.id,
+        organizationId: this.orgId,
+        contactId: contact.id,
+        direction: 'outgoing',
+        senderType: 'agent',
+        messageType: 'template',
+        templateName: 'hello_world',
+        body: 'Hello World (Official Meta Template)',
+        status: 'submitted', // Initial status MUST be submitted!
+        whatsappMessageId: data.wamid,
+        timestamp: now,
+        createdAt: now,
+        isDemo: false,
+      };
+      this.messages.push(msg);
+
+      this.logAudit('Diagnostic hello_world Sent', 'Message', msg.id, {
+        recipient: normRecipient,
+        wamid: data.wamid,
+        status: 'submitted',
+      });
+
+      this.notify();
+      this.persistDoc('messages', msg.id, msg);
+      this.persistDoc('conversations', conv.id, conv);
+    }
+
+    return data;
   }
 
   toggleConversationStatus(conversationId: string): Conversation['status'] {

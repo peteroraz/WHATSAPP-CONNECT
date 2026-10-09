@@ -425,7 +425,7 @@ export const AddContactModal: React.FC<AddContactModalProps> = ({
             </div>
           )}
           <p className="text-[11px] text-slate-400 mt-1">
-            Enter a local or international phone number. WhatsFlow will normalize valid numbers to international E.164 format.
+            Enter a local or international phone number. WatsManager will normalize valid numbers to international E.164 format.
           </p>
         </div>
 

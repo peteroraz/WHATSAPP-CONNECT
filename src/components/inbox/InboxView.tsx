@@ -12,11 +12,15 @@ import {
   User, 
   Radio, 
   AlertCircle,
-  Sparkles
+  Sparkles,
+  FileText,
+  AlertTriangle,
+  X
 } from 'lucide-react';
-import { Conversation, Message, Contact, Organization } from '../../types/index.ts';
+import { Conversation, Message, Contact, Organization, MessageTemplate } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { EmptyState } from '../common/EmptyState.tsx';
+import { Modal } from '../common/Modal.tsx';
 import { useToast } from '../common/Toast.tsx';
 
 export interface InboxViewProps {
@@ -24,9 +28,15 @@ export interface InboxViewProps {
   messages: Message[];
   contacts: Contact[];
   organization: Organization;
+  templates?: MessageTemplate[];
   selectedConversationId: string | null;
   onSelectConversation: (id: string) => void;
   onSendMessage: (conversationId: string, text: string) => Promise<any>;
+  onSendTemplateMessage?: (
+    conversationId: string,
+    template: MessageTemplate,
+    variables?: Record<string, string>
+  ) => Promise<any>;
   onToggleStatus: (conversationId: string) => void;
   onOpenSimulator: () => void;
 }
@@ -36,9 +46,11 @@ export const InboxView: React.FC<InboxViewProps> = ({
   messages,
   contacts,
   organization,
+  templates = [],
   selectedConversationId,
   onSelectConversation,
   onSendMessage,
+  onSendTemplateMessage,
   onToggleStatus,
   onOpenSimulator,
 }) => {
@@ -47,6 +59,9 @@ export const InboxView: React.FC<InboxViewProps> = ({
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'Open' | 'Closed'>('ALL');
   const [replyText, setReplyText] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-select first conversation if none selected
@@ -96,23 +111,53 @@ export const InboxView: React.FC<InboxViewProps> = ({
   }, [messages, selectedConversationId]);
 
   // 24-Hour WhatsApp Customer Care Window calculation
+  // Determined from the latest real incoming customer message timestamp
   const sessionWindow = useMemo(() => {
-    if (!activeConversation || !activeConversation.lastIncomingMessageAt) {
+    if (!activeConversation) {
       return { isOpen: false, hoursLeft: 0 };
     }
-    const lastIncoming = new Date(activeConversation.lastIncomingMessageAt).getTime();
+
+    const incomingMsgs = activeMessages.filter((m) => m.direction === 'incoming');
+    const latestIncomingMsgTime = incomingMsgs.length > 0 ? incomingMsgs[incomingMsgs.length - 1].timestamp : null;
+    const effectiveLastIncoming = latestIncomingMsgTime || activeConversation.lastIncomingMessageAt;
+
+    if (!effectiveLastIncoming) {
+      return { isOpen: false, hoursLeft: 0 };
+    }
+
+    const lastIncoming = new Date(effectiveLastIncoming).getTime();
+    if (isNaN(lastIncoming) || lastIncoming <= 0) {
+      return { isOpen: false, hoursLeft: 0 };
+    }
+
     const now = Date.now();
     const diffMs = now - lastIncoming;
     const diffHours = diffMs / (1000 * 60 * 60);
 
-    if (diffHours < 24) {
+    if (diffHours < 24 && diffHours >= 0) {
       return {
         isOpen: true,
         hoursLeft: Math.max(1, Math.round(24 - diffHours)),
       };
     }
     return { isOpen: false, hoursLeft: 0 };
-  }, [activeConversation]);
+  }, [activeConversation, activeMessages]);
+
+  // Templates eligible for outbound sending: in Live Mode, only APPROVED Meta Live Templates
+  const eligibleTemplates = useMemo(() => {
+    return templates.filter((t) => {
+      const isApproved = (t.status || '').toUpperCase() === 'APPROVED';
+      if (!isApproved) return false;
+      if (organization.whatsappConnected) {
+        return (
+          t.isLiveMeta === true ||
+          (!t.isDemo && t.name === 'hello_world') ||
+          Boolean(t.whatsappTemplateId?.startsWith('meta_'))
+        );
+      }
+      return true;
+    });
+  }, [templates, organization.whatsappConnected]);
 
   const handleSend = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -145,15 +190,17 @@ export const InboxView: React.FC<InboxViewProps> = ({
         <div className="p-3.5 border-b border-slate-200 bg-white space-y-2.5">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-900">Conversations</h2>
-            <button
-              id="inbox-simulator-btn"
-              type="button"
-              onClick={onOpenSimulator}
-              className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-md border border-emerald-200 transition-colors flex items-center gap-1"
-            >
-              <Bot className="w-3 h-3" />
-              Simulate Message
-            </button>
+            {!organization.whatsappConnected && (
+              <button
+                id="inbox-simulator-btn"
+                type="button"
+                onClick={onOpenSimulator}
+                className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-md border border-emerald-200 transition-colors flex items-center gap-1"
+              >
+                <Bot className="w-3 h-3" />
+                Simulate Message
+              </button>
+            )}
           </div>
 
           <div className="relative">
@@ -384,13 +431,32 @@ export const InboxView: React.FC<InboxViewProps> = ({
                             })}
                           </span>
                           {!isIncoming && (
-                            <span>
+                            <span className="flex items-center gap-1">
                               {msg.status === 'Read' ? (
-                                <CheckCheck className="w-3.5 h-3.5 text-blue-200" />
+                                <span className="flex items-center gap-0.5 text-[10px] text-blue-200 font-medium" title="Read by recipient">
+                                  <CheckCheck className="w-3.5 h-3.5 text-blue-200" />
+                                  <span>Read</span>
+                                </span>
                               ) : msg.status === 'Delivered' ? (
-                                <CheckCheck className="w-3.5 h-3.5 text-emerald-200" />
+                                <span className="flex items-center gap-0.5 text-[10px] text-emerald-200 font-medium" title="Delivered to WhatsApp">
+                                  <CheckCheck className="w-3.5 h-3.5 text-emerald-200" />
+                                  <span>Delivered</span>
+                                </span>
+                              ) : msg.status === 'Failed' ? (
+                                <span className="flex items-center gap-0.5 text-[10px] text-rose-300 font-semibold" title={`Failed: ${msg.failureReason || 'Error'}`}>
+                                  <AlertTriangle className="w-3.5 h-3.5 text-rose-300" />
+                                  <span>Failed</span>
+                                </span>
+                              ) : msg.status === 'submitted' ? (
+                                <span className="flex items-center gap-1 text-[10px] text-emerald-100 font-semibold bg-emerald-700/60 px-1.5 py-0.5 rounded shadow-2xs" title="Submitted to Meta WhatsApp Cloud API">
+                                  <Clock className="w-3 h-3 text-emerald-200 animate-pulse" />
+                                  <span>Submitted</span>
+                                </span>
                               ) : (
-                                <Check className="w-3.5 h-3.5 text-emerald-200" />
+                                <span className="flex items-center gap-0.5 text-[10px] text-emerald-200 font-medium" title="Sent">
+                                  <Check className="w-3.5 h-3.5 text-emerald-200" />
+                                  <span>Sent</span>
+                                </span>
                               )}
                             </span>
                           )}
@@ -412,8 +478,63 @@ export const InboxView: React.FC<InboxViewProps> = ({
                     resubscribe.
                   </span>
                 </div>
+              ) : !sessionWindow.isOpen && organization.whatsappConnected ? (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 font-semibold text-amber-900">
+                      <Clock className="w-4 h-4 text-amber-600" />
+                      <span>24-Hour Customer Window Expired</span>
+                    </div>
+                    <Badge variant="amber" size="sm">Template Required</Badge>
+                  </div>
+                  <p className="text-[11px] text-amber-800 leading-relaxed">
+                    Meta WhatsApp Business Platform policy restricts free-form text messages outside the 24-hour service window. To restart communication, send an approved Message Template.
+                  </p>
+                  <div>
+                    <button
+                      id="inbox-send-template-btn"
+                      type="button"
+                      onClick={() => {
+                        if (eligibleTemplates.length > 0) {
+                          const chosen =
+                            eligibleTemplates.find((t) => t.name === 'hello_world') || eligibleTemplates[0];
+                          setSelectedTemplateId(chosen.id);
+                          setTemplateVariables({
+                            '1': activeContact?.firstName || 'Customer',
+                            '2': activeContact?.company || organization.name,
+                          });
+                        }
+                        setIsTemplateModalOpen(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-md shadow-xs transition-colors"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      Send Approved Template
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <form onSubmit={handleSend} className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    title="Send an Approved Message Template"
+                    onClick={() => {
+                      if (eligibleTemplates.length > 0) {
+                        const chosen =
+                          eligibleTemplates.find((t) => t.name === 'hello_world') || eligibleTemplates[0];
+                        setSelectedTemplateId(chosen.id);
+                        setTemplateVariables({
+                          '1': activeContact?.firstName || 'Customer',
+                          '2': activeContact?.company || organization.name,
+                        });
+                      }
+                      setIsTemplateModalOpen(true);
+                    }}
+                    className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-slate-200"
+                  >
+                    <FileText className="w-4 h-4" />
+                  </button>
+
                   <textarea
                     id="chat-reply-textarea"
                     rows={1}
@@ -446,6 +567,151 @@ export const InboxView: React.FC<InboxViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Template Sender Modal */}
+      {isTemplateModalOpen && (
+        <Modal
+          isOpen={isTemplateModalOpen}
+          onClose={() => setIsTemplateModalOpen(false)}
+          title="Send Approved WhatsApp Template"
+          subtitle="Initiate customer communication compliant with Meta WhatsApp Cloud API rules"
+        >
+          <div className="space-y-4">
+            {eligibleTemplates.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+                <AlertCircle className="w-6 h-6 text-amber-500 mx-auto" />
+                <p className="font-semibold text-slate-800">No Approved Templates Available</p>
+                <p className="text-[11px] text-slate-400">
+                  Please synchronize templates from Meta in the Templates tab before sending outside the 24-hour window.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Select Approved Template {organization.whatsappConnected && '(Meta Live Only)'}
+                  </label>
+                  <select
+                    id="template-select-dropdown"
+                    value={selectedTemplateId}
+                    onChange={(e) => {
+                      const tplId = e.target.value;
+                      setSelectedTemplateId(tplId);
+                      const tpl = eligibleTemplates.find((t) => t.id === tplId);
+                      if (tpl) {
+                        setTemplateVariables({
+                          '1': activeContact?.firstName || 'Customer',
+                          '2': activeContact?.company || organization.name,
+                        });
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                  >
+                    {eligibleTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} ({t.category} • {t.language}) {t.isLiveMeta ? '• Meta Live Template' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Template Preview and Variables */}
+                {(() => {
+                  const activeTpl = eligibleTemplates.find((t) => t.id === selectedTemplateId) || eligibleTemplates[0];
+                  if (!activeTpl) return null;
+
+                  const varMatches = Array.from(activeTpl.body.matchAll(/\{\{(\d+)\}\}/g));
+                  const varNums = Array.from(new Set(varMatches.map((m) => m[1]))).sort();
+
+                  let renderedPreview = activeTpl.body;
+                  varNums.forEach((num) => {
+                    const val = templateVariables[num] || `{{${num}}}`;
+                    renderedPreview = renderedPreview.replace(new RegExp(`\\{\\{${num}\\}\\}`, 'g'), val);
+                  });
+
+                  return (
+                    <div className="space-y-3">
+                      {varNums.length > 0 && (
+                        <div className="space-y-2">
+                          <label className="block text-xs font-semibold text-slate-700">
+                            Template Variables
+                          </label>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {varNums.map((num) => (
+                              <div key={num} className="flex items-center gap-2">
+                                <span className="text-[11px] font-mono text-slate-500 w-10">
+                                  {`{{${num}}}`}
+                                </span>
+                                <input
+                                  type="text"
+                                  placeholder={num === '1' ? 'First Name' : num === '2' ? 'Company' : 'Value'}
+                                  value={templateVariables[num] || ''}
+                                  onChange={(e) =>
+                                    setTemplateVariables({
+                                      ...templateVariables,
+                                      [num]: e.target.value,
+                                    })
+                                  }
+                                  className="flex-1 px-2.5 py-1.5 border border-slate-200 rounded-md text-xs"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-1">
+                        <label className="block text-xs font-semibold text-slate-700">Message Preview</label>
+                        <div className="p-3 bg-emerald-50/50 border border-emerald-200 rounded-lg text-xs text-slate-800 whitespace-pre-wrap leading-relaxed">
+                          {renderedPreview}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setIsTemplateModalOpen(false)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-500 hover:text-slate-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    id="confirm-send-template-btn"
+                    type="button"
+                    disabled={isSending || !selectedTemplateId}
+                    onClick={async () => {
+                      const tpl = templates.find((t) => t.id === selectedTemplateId);
+                      if (!tpl || !activeConversation) return;
+
+                      try {
+                        setIsSending(true);
+                        if (onSendTemplateMessage) {
+                          await onSendTemplateMessage(activeConversation.id, tpl, templateVariables);
+                        } else {
+                          await onSendMessage(activeConversation.id, tpl.body);
+                        }
+                        setIsSending(false);
+                        setIsTemplateModalOpen(false);
+                        toast(`Template "${tpl.name}" dispatched successfully.`);
+                      } catch (err: any) {
+                        setIsSending(false);
+                        toast(err.message || 'Failed to dispatch template', 'error');
+                      }
+                    }}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors flex items-center gap-1.5"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    {isSending ? 'Sending...' : 'Send Template'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 };

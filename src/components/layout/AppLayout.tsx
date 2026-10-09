@@ -51,6 +51,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   children,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [devMode, setDevMode] = useState(false);
 
   interface NavItem {
     id: ActiveTab;
@@ -88,20 +89,22 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             W
           </div>
           <div>
-            <h1 className="font-bold text-slate-900 leading-tight">WhatsFlow</h1>
+            <h1 className="font-bold text-slate-900 leading-tight">WatsManager</h1>
             <p className="text-xs text-slate-500 truncate max-w-[150px]">{organization.name}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            id="mobile-simulator-btn"
-            type="button"
-            onClick={onOpenSimulator}
-            className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"
-            title="Simulate Inbound WhatsApp Message"
-          >
-            <Bot className="w-5 h-5 text-emerald-600" />
-          </button>
+          {(!organization.whatsappConnected || devMode) && (
+            <button
+              id="mobile-simulator-btn"
+              type="button"
+              onClick={onOpenSimulator}
+              className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"
+              title="Simulate Inbound WhatsApp Message"
+            >
+              <Bot className="w-5 h-5 text-emerald-600" />
+            </button>
+          )}
           <button
             id="mobile-nav-toggle"
             type="button"
@@ -129,7 +132,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
               </div>
               <div>
                 <span className="font-bold text-lg tracking-tight text-slate-900 block leading-tight">
-                  WhatsFlow
+                  WatsManager
                 </span>
                 <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
                   Cloud API V1
@@ -187,29 +190,34 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           })}
 
           {/* Quick Utility Actions in Nav */}
-          <div className="pt-4 mt-4 border-t border-slate-100 space-y-1">
-            <div className="px-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-              Testing & Controls
+          {(!organization.whatsappConnected || devMode) && (
+            <div className="pt-4 mt-4 border-t border-slate-100 space-y-1">
+              <div className="px-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                <span>Testing & Controls</span>
+                {organization.whatsappConnected && (
+                  <Badge variant="amber" size="sm">Dev Mode</Badge>
+                )}
+              </div>
+              <button
+                id="sidebar-simulator-btn"
+                type="button"
+                onClick={onOpenSimulator}
+                className="w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-xs font-medium text-slate-600 hover:bg-emerald-50 hover:text-emerald-800 transition-colors"
+              >
+                <Bot className="w-4 h-4 text-emerald-600" />
+                <span>Inbound Simulator</span>
+              </button>
+              <button
+                id="sidebar-reset-btn"
+                type="button"
+                onClick={onResetDemoData}
+                className="w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
+              >
+                <RotateCcw className="w-4 h-4 text-slate-400" />
+                <span>Reset Demo Data</span>
+              </button>
             </div>
-            <button
-              id="sidebar-simulator-btn"
-              type="button"
-              onClick={onOpenSimulator}
-              className="w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-xs font-medium text-slate-600 hover:bg-emerald-50 hover:text-emerald-800 transition-colors"
-            >
-              <Bot className="w-4 h-4 text-emerald-600" />
-              <span>Inbound Simulator</span>
-            </button>
-            <button
-              id="sidebar-reset-btn"
-              type="button"
-              onClick={onResetDemoData}
-              className="w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
-            >
-              <RotateCcw className="w-4 h-4 text-slate-400" />
-              <span>Reset Sample Data</span>
-            </button>
-          </div>
+          )}
         </nav>
 
         {/* User Account & Logout */}
@@ -251,7 +259,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             </h2>
             {organization.whatsappConnected ? (
               <Badge variant="emerald" size="sm" id="header-whatsapp-status-badge">
-                WhatsApp Cloud API
+                WhatsApp Cloud API (Live)
               </Badge>
             ) : (
               <div className="flex items-center gap-2">
@@ -265,24 +273,45 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             )}
           </div>
           <div className="flex items-center gap-2.5">
-            <button
-              id="header-simulator-btn"
-              type="button"
-              onClick={onOpenSimulator}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-lg border border-emerald-200 transition-colors"
-            >
-              <Bot className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Simulate Customer Message</span>
-            </button>
-            <button
-              id="header-reset-btn"
-              type="button"
-              onClick={onResetDemoData}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium rounded-lg border border-slate-200 transition-colors"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-              <span>Reset Demo Data</span>
-            </button>
+            {organization.whatsappConnected && (
+              <button
+                id="dev-mode-toggle-btn"
+                type="button"
+                onClick={() => setDevMode(!devMode)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                  devMode
+                    ? 'bg-amber-100 text-amber-900 border-amber-300 font-semibold'
+                    : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
+                }`}
+                title="Toggle sandbox developer controls in Live Mode"
+              >
+                <Bot className="w-3.5 h-3.5 text-amber-600" />
+                <span>{devMode ? 'Dev Sandbox: ON' : 'Developer Sandbox'}</span>
+              </button>
+            )}
+
+            {(!organization.whatsappConnected || devMode) && (
+              <>
+                <button
+                  id="header-simulator-btn"
+                  type="button"
+                  onClick={onOpenSimulator}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-lg border border-emerald-200 transition-colors"
+                >
+                  <Bot className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Simulate Customer Message</span>
+                </button>
+                <button
+                  id="header-reset-btn"
+                  type="button"
+                  onClick={onResetDemoData}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium rounded-lg border border-slate-200 transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Reset Demo Data</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 

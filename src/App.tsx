@@ -56,7 +56,7 @@ function MainApp() {
           <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white font-bold text-xl animate-pulse">
             W
           </div>
-          <span className="text-xs text-slate-500 font-medium">Initializing WhatsFlow...</span>
+          <span className="text-xs text-slate-500 font-medium">Initializing WatsManager...</span>
         </div>
       </div>
     );
@@ -153,12 +153,18 @@ function MainApp() {
           messages={dataStore.messages}
           contacts={dataStore.contacts}
           organization={currentOrg}
+          templates={dataStore.templates}
           selectedConversationId={selectedConversationId}
           onSelectConversation={(id) => {
             setSelectedConversationId(id);
             dataStore.markConversationAsRead(id);
           }}
-          onSendMessage={(convId, text) => dataStore.sendManualMessage(convId, text)}
+          onSendMessage={(convId, text) =>
+            dataStore.sendManualMessage(convId, text, currentOrg.whatsappConnected)
+          }
+          onSendTemplateMessage={(convId, tpl, vars) =>
+            dataStore.sendManualTemplateMessage(convId, tpl, vars, currentOrg.whatsappConnected)
+          }
           onToggleStatus={(convId) => dataStore.toggleConversationStatus(convId)}
           onOpenSimulator={() => setIsSimulatorOpen(true)}
         />
@@ -178,6 +184,8 @@ function MainApp() {
         <TemplatesView
           templates={dataStore.templates}
           onAddTemplate={(data) => dataStore.addTemplate(data)}
+          onSyncMetaTemplates={() => dataStore.syncTemplatesFromMeta()}
+          isWhatsAppConnected={currentOrg.whatsappConnected}
         />
       )}
 

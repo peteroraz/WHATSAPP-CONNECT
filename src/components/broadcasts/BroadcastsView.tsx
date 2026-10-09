@@ -9,7 +9,9 @@ import {
   Eye, 
   AlertCircle,
   BarChart3,
-  Calendar
+  Calendar,
+  Sparkles,
+  Radio
 } from 'lucide-react';
 import { Campaign, Contact, ContactGroup, MessageTemplate } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
@@ -63,6 +65,29 @@ export const BroadcastsView: React.FC<BroadcastsViewProps> = ({
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
+      {/* Mode Visibility Banner */}
+      {isWhatsAppConnected ? (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs rounded-xl flex items-center justify-between shadow-2xs">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>
+              <strong>Live Mode Active:</strong> Broadcast campaigns are dispatched via official Meta WhatsApp Cloud API. Submissions start with status <em>Sent</em> and advance to <em>Delivered</em> and <em>Read</em> via live webhooks.
+            </span>
+          </div>
+          <Badge variant="emerald" size="sm">Live Cloud API</Badge>
+        </div>
+      ) : (
+        <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 text-xs rounded-xl flex items-center justify-between shadow-2xs">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              <strong>Demo Mode Active:</strong> Running in simulated sandbox mode. No real WhatsApp messages are sent. Configure server credentials in Settings to enable Live Mode.
+            </span>
+          </div>
+          <Badge variant="amber" size="sm">Demo Sandbox</Badge>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
