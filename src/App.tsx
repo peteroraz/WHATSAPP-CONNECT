@@ -13,6 +13,7 @@ import { TemplatesView } from './components/templates/TemplatesView.tsx';
 import { SettingsView } from './components/settings/SettingsView.tsx';
 import { AuthView } from './components/auth/AuthView.tsx';
 import { SimulatorModal } from './components/inbox/SimulatorModal.tsx';
+import { AppLogo } from './components/common/AppLogo.tsx';
 
 function MainApp() {
   const { toast } = useToast();
@@ -53,9 +54,7 @@ function MainApp() {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white font-bold text-xl animate-pulse">
-            W
-          </div>
+          <AppLogo size="lg" className="animate-pulse" />
           <span className="text-xs text-slate-500 font-medium">Initializing WatsManager...</span>
         </div>
       </div>

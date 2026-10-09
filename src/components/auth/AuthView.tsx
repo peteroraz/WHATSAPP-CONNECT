@@ -11,6 +11,7 @@ import {
   ShieldCheck, 
   AlertCircle 
 } from 'lucide-react';
+import { AppLogo } from '../common/AppLogo.tsx';
 
 export interface AuthViewProps {
   onSuccess: (user: any, org: any) => void;
@@ -81,9 +82,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 antialiased">
       <div className="sm:mx-auto sm:w-full sm:max-w-md">
         <div className="flex items-center justify-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white font-bold text-xl shadow-md">
-            W
-          </div>
+          <AppLogo size="lg" />
           <div>
             <h1 className="text-2xl font-bold text-slate-900 tracking-tight">WatsManager</h1>
             <p className="text-xs text-slate-500 font-medium">

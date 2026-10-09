@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Organization, UserProfile } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
+import { AppLogo } from '../common/AppLogo.tsx';
 
 export type ActiveTab = 
   | 'dashboard' 
@@ -84,10 +85,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row text-slate-800 antialiased font-sans">
       {/* Mobile Top Bar */}
       <header className="md:hidden bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between z-30 sticky top-0">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white font-bold text-base shadow-xs">
-            W
-          </div>
+        <div className="flex items-center gap-2.5">
+          <AppLogo size="sm" />
           <div>
             <h1 className="font-bold text-slate-900 leading-tight">WatsManager</h1>
             <p className="text-xs text-slate-500 truncate max-w-[150px]">{organization.name}</p>
@@ -126,19 +125,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
         {/* Top: Brand and Org */}
         <div className="p-5 border-b border-slate-100">
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-lg bg-emerald-600 flex items-center justify-center text-white font-bold text-lg shadow-xs">
-                W
-              </div>
-              <div>
-                <span className="font-bold text-lg tracking-tight text-slate-900 block leading-tight">
-                  WatsManager
-                </span>
-                <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                  Cloud API V1
-                </span>
-              </div>
-            </div>
+            <AppLogo size="md" showText subtext="Cloud API V1" />
           </div>
 
           <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
