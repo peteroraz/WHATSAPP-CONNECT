@@ -15,9 +15,10 @@ import { AppLogo } from '../common/AppLogo.tsx';
 
 export interface AuthViewProps {
   onSuccess: (user: any, org: any) => void;
+  onNavigate?: (path: string) => void;
 }
 
-export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
+export const AuthView: React.FC<AuthViewProps> = ({ onSuccess, onNavigate }) => {
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -244,10 +245,39 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
           </div>
         </div>
 
-        {/* Security & compliance reassurance badge */}
-        <div className="mt-6 flex items-center justify-center gap-2 text-slate-400 text-xs text-center">
-          <ShieldCheck className="w-4 h-4 text-emerald-600" />
-          <span>Meta WhatsApp Cloud API & GDPR Consent Compliant</span>
+        {/* Security & compliance reassurance badge & public legal links */}
+        <div className="mt-6 flex flex-col items-center gap-2 text-slate-400 text-xs text-center">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+            <span>Meta WhatsApp Cloud API & GDPR Consent Compliant</span>
+          </div>
+          <div className="flex items-center gap-3 text-[11px] text-slate-500 pt-1">
+            <a
+              href="/privacy"
+              onClick={(e) => {
+                if (onNavigate) {
+                  e.preventDefault();
+                  onNavigate('/privacy');
+                }
+              }}
+              className="text-slate-500 hover:text-emerald-700 underline transition-colors"
+            >
+              Privacy Policy
+            </a>
+            <span>•</span>
+            <a
+              href="/data-deletion"
+              onClick={(e) => {
+                if (onNavigate) {
+                  e.preventDefault();
+                  onNavigate('/data-deletion');
+                }
+              }}
+              className="text-slate-500 hover:text-emerald-700 underline transition-colors"
+            >
+              Data Deletion Instructions
+            </a>
+          </div>
         </div>
       </div>
     </div>

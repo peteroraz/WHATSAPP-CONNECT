@@ -37,6 +37,7 @@ export interface AppLayoutProps {
   onLogout: () => void;
   onOpenSimulator: () => void;
   onResetDemoData: () => void;
+  onNavigate?: (path: string) => void;
   children: React.ReactNode;
 }
 
@@ -49,6 +50,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   onLogout,
   onOpenSimulator,
   onResetDemoData,
+  onNavigate,
   children,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -232,6 +234,34 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             >
               <LogOut className="w-4 h-4" />
             </button>
+          </div>
+
+          <div className="mt-3 pt-2.5 border-t border-slate-200/60 flex items-center justify-between text-[10px] text-slate-400">
+            <a
+              href="/privacy"
+              onClick={(e) => {
+                if (onNavigate) {
+                  e.preventDefault();
+                  onNavigate('/privacy');
+                }
+              }}
+              className="hover:text-emerald-700 transition-colors"
+            >
+              Privacy Policy
+            </a>
+            <span>•</span>
+            <a
+              href="/data-deletion"
+              onClick={(e) => {
+                if (onNavigate) {
+                  e.preventDefault();
+                  onNavigate('/data-deletion');
+                }
+              }}
+              className="hover:text-emerald-700 transition-colors"
+            >
+              Data Deletion
+            </a>
           </div>
         </div>
       </aside>

@@ -14,8 +14,14 @@ import { SettingsView } from './components/settings/SettingsView.tsx';
 import { AuthView } from './components/auth/AuthView.tsx';
 import { SimulatorModal } from './components/inbox/SimulatorModal.tsx';
 import { AppLogo } from './components/common/AppLogo.tsx';
+import { PrivacyPolicyView } from './components/public/PrivacyPolicyView.tsx';
+import { DataDeletionView } from './components/public/DataDeletionView.tsx';
 
-function MainApp() {
+interface MainAppProps {
+  onNavigate: (path: string) => void;
+}
+
+function MainApp({ onNavigate }: MainAppProps) {
   const { toast } = useToast();
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [currentOrg, setCurrentOrg] = useState<Organization | null>(null);
@@ -69,6 +75,7 @@ function MainApp() {
           setCurrentOrg(org);
           dataStore.initialize(org.id);
         }}
+        onNavigate={onNavigate}
       />
     );
   }
@@ -102,6 +109,7 @@ function MainApp() {
       onLogout={handleLogout}
       onOpenSimulator={() => setIsSimulatorOpen(true)}
       onResetDemoData={handleResetDemoData}
+      onNavigate={onNavigate}
     >
       {currentTab === 'dashboard' && (
         <DashboardView
@@ -196,6 +204,7 @@ function MainApp() {
             const updatedOrg = { ...currentOrg, ...updates };
             setCurrentOrg(updatedOrg);
           }}
+          onNavigate={onNavigate}
         />
       )}
 
@@ -214,9 +223,46 @@ function MainApp() {
 }
 
 export default function App() {
+  const [currentRoute, setCurrentRoute] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const p = window.location.pathname.replace(/\/+$/, '') || '/';
+      return p;
+    }
+    return '/';
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const p = window.location.pathname.replace(/\/+$/, '') || '/';
+      setCurrentRoute(p);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigate = (path: string) => {
+    const cleanPath = path.replace(/\/+$/, '') || '/';
+    if (window.location.pathname !== cleanPath) {
+      window.history.pushState(null, '', cleanPath);
+    }
+    setCurrentRoute(cleanPath);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Public Unauthenticated Route: Privacy Policy
+  if (currentRoute === '/privacy') {
+    return <PrivacyPolicyView onNavigate={navigate} />;
+  }
+
+  // Public Unauthenticated Route: Data Deletion Instructions
+  if (currentRoute === '/data-deletion') {
+    return <DataDeletionView onNavigate={navigate} />;
+  }
+
   return (
     <ToastProvider>
-      <MainApp />
+      <MainApp onNavigate={navigate} />
     </ToastProvider>
   );
 }

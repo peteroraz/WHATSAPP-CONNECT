@@ -29,6 +29,7 @@ export interface SettingsViewProps {
   organization: Organization;
   currentUser: UserProfile;
   onUpdateOrganization: (updates: Partial<Organization>) => void;
+  onNavigate?: (path: string) => void;
 }
 
 export type ConnectionState = 'Not Configured' | 'Testing' | 'Connected' | 'Connection Error';
@@ -37,6 +38,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   organization,
   currentUser,
   onUpdateOrganization,
+  onNavigate,
 }) => {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<'general' | 'whatsapp' | 'hours' | 'compliance'>('general');
@@ -819,6 +821,92 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     {k}
                   </span>
                 ))}
+              </div>
+            </div>
+
+            {/* Public Legal & Meta Compliance URLs */}
+            <div className="p-4 bg-emerald-50/60 border border-emerald-200 rounded-lg space-y-3">
+              <div>
+                <span className="font-bold text-slate-900 text-xs block">
+                  Public Legal & Meta App Review URLs
+                </span>
+                <p className="text-[11px] text-slate-600 mt-0.5">
+                  These URLs are publicly accessible without authentication. Provide them in your Meta Developer App Dashboard under App Review &gt; Business Verification.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    Privacy Policy URL
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={`${window.location.origin}/privacy`}
+                      className="flex-1 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-mono text-slate-700"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(`${window.location.origin}/privacy`, 'privacy-url')}
+                      className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1 shadow-2xs"
+                    >
+                      {copiedKey === 'privacy-url' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      Copy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (onNavigate) {
+                          onNavigate('/privacy');
+                        } else {
+                          window.open('/privacy', '_blank');
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1 shadow-2xs"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      Open
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    User Data Deletion Instructions URL
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={`${window.location.origin}/data-deletion`}
+                      className="flex-1 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-mono text-slate-700"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(`${window.location.origin}/data-deletion`, 'deletion-url')}
+                      className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1 shadow-2xs"
+                    >
+                      {copiedKey === 'deletion-url' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      Copy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (onNavigate) {
+                          onNavigate('/data-deletion');
+                        } else {
+                          window.open('/data-deletion', '_blank');
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1 shadow-2xs"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      Open
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { AutomationRule, BusinessHours } from '../types/index.ts';
+import type { AutomationRule, BusinessHours } from '../types/index.ts';
 
 export interface EvaluationContext {
   messageBody: string;

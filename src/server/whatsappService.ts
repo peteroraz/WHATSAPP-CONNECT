@@ -8,7 +8,7 @@
 import crypto from 'crypto';
 import { evaluateMessageConsentCommands } from './optOutHandler.ts';
 import { evaluateAutomationRules } from './automationRunner.ts';
-import { AutomationRule, MessageTemplate } from '../types/index.ts';
+import type { AutomationRule, MessageTemplate } from '../types/index.ts';
 
 export interface WhatsAppConfigStatus {
   configured: boolean;

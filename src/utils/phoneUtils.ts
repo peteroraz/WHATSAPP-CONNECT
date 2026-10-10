@@ -3,7 +3,7 @@
  * Supports E.164 standard formatting with dedicated support for Nigerian and international numbers.
  */
 
-import { ConsentStatus, Contact } from '../types/index.ts';
+import type { ConsentStatus, Contact } from '../types/index.ts';
 
 export interface CountryOption {
   code: string;

@@ -1,8 +1,9 @@
-import express, { Request, Response, Router } from 'express';
+import express, { Router } from 'express';
+import type { Request, Response } from 'express';
 import { whatsappService } from './whatsappService.ts';
 import { evaluateMessageConsentCommands } from './optOutHandler.ts';
 import { evaluateAutomationRules } from './automationRunner.ts';
-import { AutomationRule } from '../types/index.ts';
+import type { AutomationRule } from '../types/index.ts';
 import { normalizePhoneNumber } from '../utils/phoneUtils.ts';
 
 export const apiRouter: Router = express.Router();
