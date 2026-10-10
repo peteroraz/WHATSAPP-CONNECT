@@ -737,7 +737,7 @@ export class WhatsAppService {
     this.addEventRecord({
       id: `evt_status_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: 'status_update',
-      timestamp: eventTimestamp,
+      timestamp: new Date().toISOString(),
       payload: {
         wamid,
         status,
@@ -857,7 +857,7 @@ export class WhatsAppService {
     this.addEventRecord({
       id: `evt_inbound_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: 'incoming_message',
-      timestamp: msgTimestamp,
+      timestamp: new Date().toISOString(),
       payload: {
         wamid,
         fromPhone: formattedPhone,

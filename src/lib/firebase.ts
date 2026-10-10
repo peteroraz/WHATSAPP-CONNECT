@@ -7,16 +7,16 @@ import {
   createUserWithEmailAndPassword, 
   signOut, 
   onAuthStateChanged,
-  User as FirebaseUser 
+  type User as FirebaseUser 
 } from 'firebase/auth';
 import { 
   initializeFirestore,
   getFirestore, 
   doc, 
   getDocFromServer,
-  Firestore
+  type Firestore
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
 
 // Initialize Firebase App safely (singleton)
 export const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
@@ -43,15 +43,16 @@ async function testConnection() {
 }
 testConnection();
 
-// Standardized Firestore error handling required by the Firebase integration skill
-export enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
+// Standardized Firestore error handling compatible with all TypeScript and Node runtime loaders
+export const OperationType = {
+  CREATE: 'create',
+  UPDATE: 'update',
+  DELETE: 'delete',
+  LIST: 'list',
+  GET: 'get',
+  WRITE: 'write',
+} as const;
+export type OperationType = (typeof OperationType)[keyof typeof OperationType];
 
 export interface FirestoreErrorInfo {
   error: string;

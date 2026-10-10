@@ -1,4 +1,4 @@
-import { 
+import type { 
   Contact, 
   ContactGroup, 
   MessageTemplate, 
@@ -34,10 +34,27 @@ class DataStore {
   private orgId: string = 'default_org';
   private initialized: boolean = false;
   private listeners: Set<() => void> = new Set();
-  private lastEventSyncTimestamp: string = new Date().toISOString();
+  private lastEventSyncTimestamp: string = '';
   private eventSyncTimer: any = null;
+  private processedEventIds: Set<string> = new Set();
 
-  serverWhatsAppStatus: 'Not Configured' | 'Testing' | 'Connected' | 'Connection Error' = 'Not Configured';
+  serverWhatsAppStatus: 'Not Configured' | 'Testing' | 'Connected' | 'Connection Error' = (() => {
+    try {
+      const cached = localStorage.getItem('whatsflow_server_whatsapp_status');
+      if (cached === 'Connected' || cached === 'Not Configured' || cached === 'Connection Error' || cached === 'Testing') {
+        return cached as any;
+      }
+    } catch {}
+    return 'Not Configured';
+  })();
+
+  constructor() {
+    this.checkServerWhatsAppStatus().catch(() => {});
+  }
+
+  get isLiveWhatsAppConnected(): boolean {
+    return this.serverWhatsAppStatus === 'Connected';
+  }
 
   contacts: Contact[] = [];
   groups: ContactGroup[] = [];
@@ -64,6 +81,12 @@ class DataStore {
 
   private getStorageKey(key: string) {
     return `whatsflow_${this.orgId}_${key}`;
+  }
+
+  private getApiUrl(endpoint: string): string {
+    if (typeof window !== 'undefined') return endpoint;
+    const port = process.env.PORT || 3000;
+    return `http://localhost:${port}${endpoint}`;
   }
 
   private saveLocal() {
@@ -205,15 +228,22 @@ class DataStore {
 
   async checkServerWhatsAppStatus(): Promise<string> {
     try {
-      const res = await fetch('/api/whatsapp/status');
+      const res = await fetch(this.getApiUrl('/api/whatsapp/status'));
       if (res.ok) {
         const data = await res.json();
-        this.serverWhatsAppStatus = data.status || (data.configured ? 'Connected' : 'Not Configured');
+        const isConnected =
+          data.status === 'Connected' ||
+          data.connected === true ||
+          (data.configured === true && data.status !== 'Connection Error');
+        this.serverWhatsAppStatus = isConnected ? 'Connected' : (data.status || 'Not Configured');
+        try {
+          localStorage.setItem('whatsflow_server_whatsapp_status', this.serverWhatsAppStatus);
+        } catch {}
         this.notify();
         return this.serverWhatsAppStatus;
       }
     } catch {}
-    return 'Not Configured';
+    return this.serverWhatsAppStatus;
   }
 
   startEventPolling() {
@@ -221,7 +251,7 @@ class DataStore {
     this.pollEvents();
     this.eventSyncTimer = setInterval(() => {
       this.pollEvents();
-    }, 3000);
+    }, 2500);
   }
 
   stopEventPolling() {
@@ -231,9 +261,10 @@ class DataStore {
     }
   }
 
-  private async pollEvents() {
+  public async pollEvents() {
     try {
-      const res = await fetch(`/api/whatsapp/events?since=${encodeURIComponent(this.lastEventSyncTimestamp)}`);
+      const queryParam = this.lastEventSyncTimestamp ? `?since=${encodeURIComponent(this.lastEventSyncTimestamp)}` : '';
+      const res = await fetch(this.getApiUrl(`/api/whatsapp/events${queryParam}`));
       if (!res.ok) return;
       const data = await res.json();
       if (!data.success || !Array.isArray(data.events) || data.events.length === 0) return;
@@ -241,19 +272,39 @@ class DataStore {
       let changed = false;
 
       for (const event of data.events) {
-        if (event.timestamp > this.lastEventSyncTimestamp) {
+        if (event.id && this.processedEventIds.has(event.id)) {
+          continue;
+        }
+        if (event.id) {
+          this.processedEventIds.add(event.id);
+        }
+
+        if (!this.lastEventSyncTimestamp || event.timestamp > this.lastEventSyncTimestamp) {
           this.lastEventSyncTimestamp = event.timestamp;
         }
 
         if (event.type === 'status_update') {
           const { wamid, status, failureReason, eventTimestamp } = event.payload;
 
-          // 1. Update matching message
+          // 1. Update matching message with strict delivery progression
           const msg = this.messages.find((m) => m.whatsappMessageId === wamid);
           if (msg) {
+            const statusRank: Record<string, number> = {
+              submitted: 1,
+              Sending: 2,
+              Sent: 3,
+              Delivered: 4,
+              Read: 5,
+              Failed: 6,
+            };
+
             const mappedStatus: Message['status'] =
               status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : status === 'failed' ? 'Failed' : 'Sent';
-            if (msg.status !== 'Read' || mappedStatus === 'Read') {
+
+            const currentRank = statusRank[msg.status] || 0;
+            const newRank = statusRank[mappedStatus] || 0;
+
+            if (mappedStatus === 'Failed' || newRank >= currentRank) {
               msg.status = mappedStatus;
               if (failureReason) msg.failureReason = failureReason;
               changed = true;
@@ -879,7 +930,18 @@ class DataStore {
     }
 
     const campaignId = `cmp_${Date.now()}`;
-    const isDemoMode = data.isDemo !== false;
+    const isServerConnected = this.serverWhatsAppStatus === 'Connected';
+
+    // Safeguard: if live connection detected but demo mode was requested
+    if (data.isDemo === true && isServerConnected) {
+      throw new Error('Live WhatsApp connection detected. Simulated sending is disabled.');
+    }
+
+    const isDemoMode = isServerConnected ? false : (data.isDemo !== false);
+
+    if (isDemoMode && isServerConnected) {
+      throw new Error('Live WhatsApp connection detected. Simulated sending is disabled.');
+    }
 
     if (!isDemoMode) {
       // LIVE MODE: Send approved templates through server-side Cloud API
@@ -890,7 +952,7 @@ class DataStore {
         );
       }
 
-      const res = await fetch('/api/whatsapp/send-broadcast', {
+      const res = await fetch(this.getApiUrl('/api/whatsapp/send-broadcast'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1155,17 +1217,35 @@ class DataStore {
   }
 
   // ================= CONVERSATIONS & INBOX =================
-  async sendManualMessage(conversationId: string, text: string, isLiveMode?: boolean): Promise<Message> {
+  async sendManualMessage(conversationId: string, text: string, isLiveModeParam?: boolean): Promise<Message> {
     const conv = this.conversations.find((c) => c.id === conversationId);
     if (!conv) throw new Error('Conversation not found');
 
     const cleanPhone = (conv.contactPhone || '').replace(/\D/g, '');
     if (!cleanPhone) throw new Error('Conversation contact has no valid phone number');
 
+    const isServerConnected = this.serverWhatsAppStatus === 'Connected';
+
+    // Safeguard: if server is Connected but demo mode was explicitly requested
+    if (isLiveModeParam === false && isServerConnected) {
+      throw new Error('Live WhatsApp connection detected. Simulated sending is disabled.');
+    }
+
+    // Determine live mode authoritatively from server connection status
+    const isLiveMode = isServerConnected || Boolean(isLiveModeParam);
+
     // Enforce 24h customer window in Live Mode
     if (isLiveMode) {
-      const lastIncoming = conv.lastIncomingMessageAt ? new Date(conv.lastIncomingMessageAt).getTime() : 0;
-      const isWindowOpen = Date.now() - lastIncoming < 24 * 60 * 60 * 1000;
+      const incomingMsgs = this.messages.filter(
+        (m) => m.conversationId === conversationId && m.direction === 'incoming'
+      );
+      const latestIncomingMsgTime = incomingMsgs.length > 0
+        ? new Date(incomingMsgs[incomingMsgs.length - 1].timestamp || incomingMsgs[incomingMsgs.length - 1].createdAt).getTime()
+        : 0;
+      const convLastIncoming = conv.lastIncomingMessageAt ? new Date(conv.lastIncomingMessageAt).getTime() : 0;
+      const effectiveLastIncomingTime = Math.max(latestIncomingMsgTime, convLastIncoming);
+      const isWindowOpen = effectiveLastIncomingTime > 0 && Date.now() - effectiveLastIncomingTime < 24 * 60 * 60 * 1000;
+
       if (!isWindowOpen) {
         throw new Error(
           'Outside 24-hour customer service window: Meta WhatsApp Cloud API requires sending an approved template to message customers after 24 hours of inactivity.'
@@ -1174,8 +1254,8 @@ class DataStore {
     }
 
     if (isLiveMode) {
-      // LIVE MODE: Do NOT create message locally until Meta returns success and wamid
-      const response = await fetch('/api/whatsapp/send-message', {
+      // LIVE MODE: Call Meta WhatsApp Cloud API via server endpoint. Do NOT create message locally until Meta returns success and real wamid
+      const response = await fetch(this.getApiUrl('/api/whatsapp/send-message'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1186,7 +1266,8 @@ class DataStore {
       });
 
       const res = await response.json().catch(() => ({}));
-      if (!res || !res.success || !res.messageId) {
+      if (!response.ok || !res || !res.success || !res.messageId) {
+        // Return visible error instead of creating a fake local message
         throw new Error(res?.error || 'Meta WhatsApp Cloud API rejected message');
       }
 
@@ -1202,8 +1283,8 @@ class DataStore {
         senderType: 'agent',
         messageType: 'text',
         body: text,
-        status: 'submitted', // Must be submitted initially; delivery/read updated via webhooks
-        whatsappMessageId: res.messageId,
+        status: 'submitted', // Meta API success + real wamid -> initial status submitted
+        whatsappMessageId: res.messageId, // Real Meta wamid
         submittedAt: now,
         timestamp: now,
         createdAt: now,
@@ -1217,9 +1298,18 @@ class DataStore {
       this.notify();
       this.persistDoc('messages', msgId, msg);
       this.persistDoc('conversations', conv.id, conv);
+
+      // Trigger immediate event poll to pick up rapid 'sent' or 'delivered' status webhooks
+      this.pollEvents().catch(() => {});
+
       return msg;
     } else {
-      // DEMO MODE: Simulate sending
+      // SAFEGUARD: If live connection detected but a send would enter Demo Mode, block operation
+      if (this.serverWhatsAppStatus === 'Connected' || localStorage.getItem('whatsflow_server_whatsapp_status') === 'Connected') {
+        throw new Error('Live WhatsApp connection detected. Simulated sending is disabled.');
+      }
+
+      // DEMO MODE: Simulate sending (Only Demo/Developer Sandbox mode may create wamid.demo.* messages)
       const now = new Date().toISOString();
       const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const mockWamid = `wamid.demo.${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
@@ -1256,13 +1346,23 @@ class DataStore {
     conversationId: string,
     template: MessageTemplate,
     variables?: Record<string, string>,
-    isLiveMode?: boolean
+    isLiveModeParam?: boolean
   ): Promise<Message> {
     const conv = this.conversations.find((c) => c.id === conversationId);
     if (!conv) throw new Error('Conversation not found');
 
     const cleanPhone = (conv.contactPhone || '').replace(/\D/g, '');
     if (!cleanPhone) throw new Error('Conversation contact has no valid phone number');
+
+    const isServerConnected = this.serverWhatsAppStatus === 'Connected';
+
+    // Safeguard: if server is Connected but demo mode was requested
+    if (isLiveModeParam === false && isServerConnected) {
+      throw new Error('Live WhatsApp connection detected. Simulated sending is disabled.');
+    }
+
+    // Determine live mode authoritatively from server connection status
+    const isLiveMode = isServerConnected || Boolean(isLiveModeParam);
 
     const isApproved = (template.status || '').toUpperCase() === 'APPROVED';
     if (!isApproved) {
@@ -1303,7 +1403,7 @@ class DataStore {
 
     if (isLiveMode) {
       // LIVE MODE: Call server WhatsApp service. Do not create fake local message beforehand.
-      const response = await fetch('/api/whatsapp/send-message', {
+      const response = await fetch(this.getApiUrl('/api/whatsapp/send-message'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1316,7 +1416,7 @@ class DataStore {
       });
 
       const res = await response.json().catch(() => ({}));
-      if (!res || !res.success || !res.messageId) {
+      if (!response.ok || !res || !res.success || !res.messageId) {
         throw new Error(res?.error || 'Meta WhatsApp Cloud API rejected template message');
       }
 
@@ -1334,7 +1434,7 @@ class DataStore {
         templateName: template.name,
         body: rendered,
         status: 'submitted', // Stored as 'submitted'; webhooks update to delivered/read/failed
-        whatsappMessageId: res.messageId,
+        whatsappMessageId: res.messageId, // Real Meta wamid
         submittedAt: now,
         timestamp: now,
         createdAt: now,
@@ -1348,9 +1448,17 @@ class DataStore {
       this.notify();
       this.persistDoc('messages', msgId, msg);
       this.persistDoc('conversations', conv.id, conv);
+
+      this.pollEvents().catch(() => {});
+
       return msg;
     } else {
-      // DEMO MODE: Simulate sending
+      // SAFEGUARD: If live connection detected but a send would enter Demo Mode, block operation
+      if (this.serverWhatsAppStatus === 'Connected' || localStorage.getItem('whatsflow_server_whatsapp_status') === 'Connected') {
+        throw new Error('Live WhatsApp connection detected. Simulated sending is disabled.');
+      }
+
+      // DEMO MODE: Simulate sending (Only Demo/Developer Sandbox mode may create wamid.demo.* messages)
       const now = new Date().toISOString();
       const msgId = `msg_tpl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const mockWamid = `wamid.demo.template.${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;

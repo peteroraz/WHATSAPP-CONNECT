@@ -36,6 +36,9 @@ function MainApp({ onNavigate }: MainAppProps) {
   const [, setTick] = useState(0);
 
   useEffect(() => {
+    // 1. Authoritative check of server WhatsApp status on application initialization
+    dataStore.checkServerWhatsAppStatus();
+
     const unsubscribeAuth = authService.onAuthStateChanged((user, org) => {
       setCurrentUser(user);
       setCurrentOrg(org);
@@ -99,11 +102,14 @@ function MainApp({ onNavigate }: MainAppProps) {
     }
   };
 
+  const isWhatsAppConnected = dataStore.serverWhatsAppStatus === 'Connected';
+  const effectiveOrg = currentOrg ? { ...currentOrg, whatsappConnected: isWhatsAppConnected } : currentOrg;
+
   return (
     <AppLayout
       currentTab={currentTab}
       onSelectTab={(tab) => setCurrentTab(tab)}
-      organization={currentOrg}
+      organization={effectiveOrg}
       user={currentUser}
       unreadMessagesCount={unreadCount}
       onLogout={handleLogout}
@@ -117,7 +123,7 @@ function MainApp({ onNavigate }: MainAppProps) {
           campaigns={dataStore.campaigns}
           conversations={dataStore.conversations}
           automationRules={dataStore.automationRules}
-          whatsappConnected={currentOrg.whatsappConnected}
+          whatsappConnected={isWhatsAppConnected}
           onNavigateTab={(tab) => setCurrentTab(tab)}
           onSelectConversation={(convId) => {
             setSelectedConversationId(convId);
@@ -149,7 +155,7 @@ function MainApp({ onNavigate }: MainAppProps) {
           contacts={dataStore.contacts}
           groups={dataStore.groups}
           templates={dataStore.templates}
-          isWhatsAppConnected={currentOrg.whatsappConnected}
+          isWhatsAppConnected={isWhatsAppConnected}
           onLaunchCampaign={(data) => dataStore.createAndSendCampaign(data)}
         />
       )}
@@ -159,7 +165,7 @@ function MainApp({ onNavigate }: MainAppProps) {
           conversations={dataStore.conversations}
           messages={dataStore.messages}
           contacts={dataStore.contacts}
-          organization={currentOrg}
+          organization={effectiveOrg}
           templates={dataStore.templates}
           selectedConversationId={selectedConversationId}
           onSelectConversation={(id) => {
@@ -167,10 +173,10 @@ function MainApp({ onNavigate }: MainAppProps) {
             dataStore.markConversationAsRead(id);
           }}
           onSendMessage={(convId, text) =>
-            dataStore.sendManualMessage(convId, text, currentOrg.whatsappConnected)
+            dataStore.sendManualMessage(convId, text)
           }
           onSendTemplateMessage={(convId, tpl, vars) =>
-            dataStore.sendManualTemplateMessage(convId, tpl, vars, currentOrg.whatsappConnected)
+            dataStore.sendManualTemplateMessage(convId, tpl, vars)
           }
           onToggleStatus={(convId) => dataStore.toggleConversationStatus(convId)}
           onOpenSimulator={() => setIsSimulatorOpen(true)}
@@ -192,13 +198,13 @@ function MainApp({ onNavigate }: MainAppProps) {
           templates={dataStore.templates}
           onAddTemplate={(data) => dataStore.addTemplate(data)}
           onSyncMetaTemplates={() => dataStore.syncTemplatesFromMeta()}
-          isWhatsAppConnected={currentOrg.whatsappConnected}
+          isWhatsAppConnected={isWhatsAppConnected}
         />
       )}
 
       {currentTab === 'settings' && (
         <SettingsView
-          organization={currentOrg}
+          organization={effectiveOrg}
           currentUser={currentUser}
           onUpdateOrganization={(updates) => {
             const updatedOrg = { ...currentOrg, ...updates };
@@ -213,9 +219,9 @@ function MainApp({ onNavigate }: MainAppProps) {
         isOpen={isSimulatorOpen}
         onClose={() => setIsSimulatorOpen(false)}
         contacts={dataStore.contacts}
-        organization={currentOrg}
+        organization={effectiveOrg}
         onSimulateIncoming={(phone, text) =>
-          dataStore.processSimulatedIncoming(phone, text, currentOrg)
+          dataStore.processSimulatedIncoming(phone, text, effectiveOrg)
         }
       />
     </AppLayout>
