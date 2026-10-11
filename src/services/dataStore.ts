@@ -9,7 +9,9 @@ import type {
   AutomationRule, 
   AuditLog, 
   OptInHistoryEvent, 
-  Organization 
+  Organization,
+  Client,
+  WhatsAppConnection
 } from '../types/index.ts';
 import { getInitialSeedData } from './seedService.ts';
 import { 
@@ -37,6 +39,9 @@ class DataStore {
   private lastEventSyncTimestamp: string = '';
   private eventSyncTimer: any = null;
   private processedEventIds: Set<string> = new Set();
+  private isPolling: boolean = false;
+  private focusListenerCleanup: (() => void) | null = null;
+  activeConversationId: string | null = null;
 
   serverWhatsAppStatus: 'Not Configured' | 'Testing' | 'Connected' | 'Connection Error' = (() => {
     try {
@@ -56,6 +61,10 @@ class DataStore {
     return this.serverWhatsAppStatus === 'Connected';
   }
 
+  clients: Client[] = [];
+  whatsappConnections: WhatsAppConnection[] = [];
+  activeClientId: string = '';
+
   contacts: Contact[] = [];
   groups: ContactGroup[] = [];
   templates: MessageTemplate[] = [];
@@ -67,6 +76,152 @@ class DataStore {
   auditLogs: AuditLog[] = [];
   optInHistory: OptInHistoryEvent[] = [];
 
+  setActiveClient(clientId: string) {
+    const client = this.clients.find((c) => c.id === clientId);
+    if (!client || client.status !== 'Active') {
+      console.warn(`Cannot set inactive or non-existent client: ${clientId}`);
+      return;
+    }
+    this.activeClientId = clientId;
+    try {
+      localStorage.setItem(`watsmanager_${this.orgId}_active_client`, clientId);
+    } catch {}
+    this.notify();
+  }
+
+  getActiveClient(): Client | null {
+    return this.clients.find((c) => c.id === this.activeClientId) || null;
+  }
+
+  addClient(clientData: Omit<Client, 'id' | 'organizationId' | 'createdAt' | 'updatedAt'>): Client {
+    const id = `client_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const now = new Date().toISOString();
+    const newClient: Client = {
+      ...clientData,
+      id,
+      organizationId: this.orgId,
+      code: (clientData.code || 'CLIENT').toUpperCase().trim(),
+      status: clientData.status || 'Active',
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.clients.push(newClient);
+    this.logAudit('Client Created', 'Client', id, { name: newClient.name, code: newClient.code });
+    this.notify();
+    this.persistDoc('clients', id, newClient);
+    return newClient;
+  }
+
+  updateClient(id: string, updates: Partial<Client>): Client | null {
+    const client = this.clients.find((c) => c.id === id);
+    if (!client) return null;
+    Object.assign(client, updates, { updatedAt: new Date().toISOString() });
+    this.logAudit('Client Updated', 'Client', id, updates);
+    this.notify();
+    this.persistDoc('clients', id, client);
+    return client;
+  }
+
+  toggleClientStatus(id: string): Client | null {
+    const client = this.clients.find((c) => c.id === id);
+    if (!client) return null;
+    client.status = client.status === 'Active' ? 'Inactive' : 'Active';
+    client.updatedAt = new Date().toISOString();
+    
+    // If currently active client was deactivated, switch to first active client
+    if (client.id === this.activeClientId && client.status === 'Inactive') {
+      const firstActive = this.clients.find((c) => c.status === 'Active');
+      if (firstActive) {
+        this.activeClientId = firstActive.id;
+        try {
+          localStorage.setItem(`watsmanager_${this.orgId}_active_client`, firstActive.id);
+        } catch {}
+      }
+    }
+    this.logAudit('Client Status Changed', 'Client', id, { status: client.status });
+    this.notify();
+    this.persistDoc('clients', id, client);
+    return client;
+  }
+
+  deleteClient(id: string): boolean {
+    const client = this.clients.find((c) => c.id === id);
+    if (!client) return false;
+
+    // Rule: Do not allow deleting a Client that already owns contacts, campaigns, messages or conversations. Use Deactivate instead.
+    const ownsContacts = this.contacts.some((c) => c.clientId === id);
+    const ownsCampaigns = this.campaigns.some((c) => c.clientId === id);
+    const ownsConversations = this.conversations.some((c) => c.clientId === id);
+    const ownsMessages = this.messages.some((m) => m.clientId === id);
+
+    if (ownsContacts || ownsCampaigns || ownsConversations || ownsMessages) {
+      throw new Error('Cannot delete a Client with existing contacts, campaigns, messages, or conversations. Please deactivate the Client instead.');
+    }
+
+    this.clients = this.clients.filter((c) => c.id !== id);
+    if (this.activeClientId === id) {
+      const firstActive = this.clients.find((c) => c.status === 'Active');
+      this.activeClientId = firstActive ? firstActive.id : '';
+      try {
+        if (this.activeClientId) {
+          localStorage.setItem(`watsmanager_${this.orgId}_active_client`, this.activeClientId);
+        }
+      } catch {}
+    }
+    this.logAudit('Client Deleted', 'Client', id, { name: client.name });
+    this.notify();
+    this.deleteFirestoreDoc('clients', id);
+    return true;
+  }
+
+  // Client-scoped data helper methods (Requirement 17)
+  getClientContacts(clientId?: string): Contact[] {
+    const targetId = clientId || this.activeClientId;
+    return this.contacts.filter((c) => c.clientId === targetId);
+  }
+
+  getClientGroups(clientId?: string): ContactGroup[] {
+    const targetId = clientId || this.activeClientId;
+    return this.groups.filter((g) => g.clientId === targetId);
+  }
+
+  getClientTemplates(clientId?: string): MessageTemplate[] {
+    const targetId = clientId || this.activeClientId;
+    return this.templates.filter((t) => t.clientId === targetId);
+  }
+
+  getClientCampaigns(clientId?: string): Campaign[] {
+    const targetId = clientId || this.activeClientId;
+    return this.campaigns.filter((c) => c.clientId === targetId);
+  }
+
+  getClientCampaignRecipients(clientId?: string): CampaignRecipient[] {
+    const targetId = clientId || this.activeClientId;
+    return this.campaignRecipients.filter((r) => r.clientId === targetId);
+  }
+
+  getClientConversations(clientId?: string): Conversation[] {
+    const targetId = clientId || this.activeClientId;
+    return this.conversations.filter((c) => c.clientId === targetId);
+  }
+
+  getClientMessages(clientId?: string): Message[] {
+    const targetId = clientId || this.activeClientId;
+    return this.messages.filter((m) => m.clientId === targetId);
+  }
+
+  getClientAutomationRules(clientId?: string): AutomationRule[] {
+    const targetId = clientId || this.activeClientId;
+    return this.automationRules.filter((r) => r.clientId === targetId);
+  }
+
+  setActiveConversationId(id: string | null) {
+    this.activeConversationId = id;
+    if (id) {
+      this.markConversationAsRead(id);
+    }
+  }
+
   subscribe(listener: () => void) {
     this.listeners.add(listener);
     return () => {
@@ -75,6 +230,19 @@ class DataStore {
   }
 
   private notify() {
+    this.clients = [...this.clients];
+    this.whatsappConnections = [...this.whatsappConnections];
+    this.contacts = [...this.contacts];
+    this.groups = [...this.groups];
+    this.templates = [...this.templates];
+    this.campaigns = [...this.campaigns];
+    this.campaignRecipients = [...this.campaignRecipients];
+    this.conversations = [...this.conversations];
+    this.messages = [...this.messages];
+    this.automationRules = [...this.automationRules];
+    this.auditLogs = [...this.auditLogs];
+    this.optInHistory = [...this.optInHistory];
+
     this.listeners.forEach((l) => l());
     this.saveLocal();
   }
@@ -91,6 +259,8 @@ class DataStore {
 
   private saveLocal() {
     try {
+      localStorage.setItem(this.getStorageKey('clients'), JSON.stringify(this.clients));
+      localStorage.setItem(this.getStorageKey('whatsapp_connections'), JSON.stringify(this.whatsappConnections));
       localStorage.setItem(this.getStorageKey('contacts'), JSON.stringify(this.contacts));
       localStorage.setItem(this.getStorageKey('groups'), JSON.stringify(this.groups));
       localStorage.setItem(this.getStorageKey('templates'), JSON.stringify(this.templates));
@@ -108,6 +278,8 @@ class DataStore {
 
   private loadLocal(): boolean {
     try {
+      this.clients = JSON.parse(localStorage.getItem(this.getStorageKey('clients')) || '[]');
+      this.whatsappConnections = JSON.parse(localStorage.getItem(this.getStorageKey('whatsapp_connections')) || '[]');
       const c = localStorage.getItem(this.getStorageKey('contacts'));
       if (!c) return false;
 
@@ -141,16 +313,97 @@ class DataStore {
       this.seedData(organizationId);
     }
 
+    // Ensure Client layer and Default Client exist (Requirement 4 & 5)
+    const defaultClientId = `client_default_${organizationId}`;
+    let defaultClient = this.clients.find((c) => c.code === 'DEFAULT' || c.id === defaultClientId);
+    if (!defaultClient) {
+      defaultClient = {
+        id: defaultClientId,
+        organizationId,
+        name: 'Default Client',
+        code: 'DEFAULT',
+        status: 'Active',
+        description: 'Primary business client workspace',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      this.clients.unshift(defaultClient);
+      this.persistDoc('clients', defaultClient.id, defaultClient);
+    }
+
+    const effectiveDefaultClientId = defaultClient.id;
+
+    // Safe, idempotent migration: assign Default Client ID to every existing record without a clientId
+    const assignDefaultClient = (records: any[]) => {
+      for (const record of records) {
+        if (!record.clientId) {
+          record.clientId = effectiveDefaultClientId;
+        }
+      }
+    };
+
+    assignDefaultClient(this.contacts);
+    assignDefaultClient(this.groups);
+    assignDefaultClient(this.templates);
+    assignDefaultClient(this.campaigns);
+    assignDefaultClient(this.campaignRecipients);
+    assignDefaultClient(this.conversations);
+    assignDefaultClient(this.messages);
+    assignDefaultClient(this.automationRules);
+    assignDefaultClient(this.auditLogs);
+    assignDefaultClient(this.optInHistory);
+
+    // Default WhatsApp connection metadata (metadata only, no secrets stored)
+    if (this.whatsappConnections.length === 0) {
+      const isConnected = this.serverWhatsAppStatus === 'Connected';
+      const defaultConn: WhatsAppConnection = {
+        id: `conn_default_${organizationId}`,
+        organizationId,
+        clientId: effectiveDefaultClientId,
+        label: 'Production WhatsApp Cloud API',
+        displayPhoneNumber: '+234 806 862 0081',
+        verifiedDisplayName: 'Official Cloud API',
+        wabaIdMasked: '••••••••3563',
+        phoneNumberIdMasked: '••••••••3367',
+        apiVersion: 'v25.0',
+        connectionStatus: isConnected ? 'Connected' : 'Not Configured',
+        isDefault: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      this.whatsappConnections.push(defaultConn);
+      this.persistDoc('whatsapp_connections', defaultConn.id, defaultConn);
+    }
+
+    // Set activeClientId (Requirement 5)
+    // Persist the selected Client in localStorage per organization: watsmanager_<organizationId>_active_client
+    const storedClient = localStorage.getItem(`watsmanager_${organizationId}_active_client`);
+    const activeClientExists = this.clients.find((c) => c.id === storedClient && c.status === 'Active');
+
+    if (activeClientExists) {
+      this.activeClientId = activeClientExists.id;
+    } else {
+      const firstActive = this.clients.find((c) => c.status === 'Active') || defaultClient;
+      this.activeClientId = firstActive ? firstActive.id : effectiveDefaultClientId;
+      try {
+        localStorage.setItem(`watsmanager_${organizationId}_active_client`, this.activeClientId);
+      } catch {}
+    }
+
     // Ensure official Meta hello_world template is available and marked isLiveMeta
     const hwIdx = this.templates.findIndex((t) => t.name === 'hello_world');
     if (hwIdx >= 0) {
       this.templates[hwIdx].isLiveMeta = true;
       this.templates[hwIdx].isDemo = false;
       this.templates[hwIdx].status = 'Approved';
+      if (!this.templates[hwIdx].clientId) {
+        this.templates[hwIdx].clientId = effectiveDefaultClientId;
+      }
     } else {
       this.templates.unshift({
         id: `tpl_hello_world_${organizationId}`,
         organizationId,
+        clientId: effectiveDefaultClientId,
         name: 'hello_world',
         language: 'en_US',
         category: 'Utility',
@@ -172,6 +425,7 @@ class DataStore {
       testContact = {
         id: `cnt_verified_test_${organizationId}`,
         organizationId,
+        clientId: effectiveDefaultClientId,
         firstName: 'Verified Test',
         lastName: 'Recipient',
         phone: '+2348068620081',
@@ -191,6 +445,8 @@ class DataStore {
         isDemo: false,
       };
       this.contacts.unshift(testContact);
+    } else if (!testContact.clientId) {
+      testContact.clientId = effectiveDefaultClientId;
     }
 
     let testConv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, '+2348068620081'));
@@ -199,6 +455,7 @@ class DataStore {
       testConv = {
         id: `cnv_verified_test_${organizationId}`,
         organizationId,
+        clientId: effectiveDefaultClientId,
         contactId: testContact.id,
         contactPhone: '+2348068620081',
         contactName: 'Verified Test Recipient',
@@ -211,6 +468,8 @@ class DataStore {
         isDemo: false,
       };
       this.conversations.unshift(testConv);
+    } else if (!testConv.clientId) {
+      testConv.clientId = effectiveDefaultClientId;
     }
     this.saveLocal();
 
@@ -252,6 +511,25 @@ class DataStore {
     this.eventSyncTimer = setInterval(() => {
       this.pollEvents();
     }, 2500);
+
+    if (typeof window !== 'undefined') {
+      const handleFocus = () => {
+        this.pollEvents();
+      };
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          this.pollEvents();
+        }
+      };
+
+      window.addEventListener('focus', handleFocus);
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+
+      this.focusListenerCleanup = () => {
+        window.removeEventListener('focus', handleFocus);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
+    }
   }
 
   stopEventPolling() {
@@ -259,9 +537,15 @@ class DataStore {
       clearInterval(this.eventSyncTimer);
       this.eventSyncTimer = null;
     }
+    if (this.focusListenerCleanup) {
+      this.focusListenerCleanup();
+      this.focusListenerCleanup = null;
+    }
   }
 
   public async pollEvents() {
+    if (this.isPolling) return;
+    this.isPolling = true;
     try {
       const queryParam = this.lastEventSyncTimestamp ? `?since=${encodeURIComponent(this.lastEventSyncTimestamp)}` : '';
       const res = await fetch(this.getApiUrl(`/api/whatsapp/events${queryParam}`));
@@ -360,10 +644,13 @@ class DataStore {
           }
 
           let conv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, fromPhone));
+          const isCurrentlyActive = Boolean(conv && this.activeConversationId === conv.id);
+
           if (!conv) {
             conv = {
               id: `cnv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               organizationId: this.orgId,
+              clientId: contact.clientId || this.activeClientId,
               contactId: contact.id,
               contactPhone: fromPhone,
               contactName: `${contact.firstName} ${contact.lastName}`.trim() || fromPhone,
@@ -379,7 +666,12 @@ class DataStore {
             conv.lastMessage = text;
             conv.lastMessageAt = timestamp;
             conv.lastIncomingMessageAt = timestamp;
-            conv.unreadCount = (conv.unreadCount || 0) + 1;
+            // If message arrives for the conversation currently open in the Inbox, keep unread at 0
+            if (isCurrentlyActive) {
+              conv.unreadCount = 0;
+            } else {
+              conv.unreadCount = (conv.unreadCount || 0) + 1;
+            }
             conv.status = 'Open';
           }
 
@@ -387,6 +679,7 @@ class DataStore {
             id: `msg_wamid_${wamid.replace(/[^a-zA-Z0-9]/g, '_')}`,
             conversationId: conv.id,
             organizationId: this.orgId,
+            clientId: conv.clientId || contact.clientId || this.activeClientId,
             contactId: contact.id,
             direction: 'incoming',
             senderType: 'customer',
@@ -423,6 +716,7 @@ class DataStore {
               id: `msg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               conversationId: conv.id,
               organizationId: this.orgId,
+              clientId: conv.clientId || contact.clientId || this.activeClientId,
               contactId: contact.id,
               direction: 'outgoing',
               senderType: 'automation',
@@ -446,6 +740,8 @@ class DataStore {
       }
     } catch {
       // Background poll silently catches transient fetch errors
+    } finally {
+      this.isPolling = false;
     }
   }
 
@@ -519,7 +815,8 @@ class DataStore {
   }
 
   seedData(organizationId: string) {
-    const seed = getInitialSeedData(organizationId);
+    const defaultClientId = `client_default_${organizationId}`;
+    const seed = getInitialSeedData(organizationId, defaultClientId);
     this.contacts = seed.contacts;
     this.groups = seed.groups;
     this.templates = seed.templates;
@@ -531,6 +828,7 @@ class DataStore {
       {
         id: `aud_${Date.now()}`,
         organizationId,
+        clientId: defaultClientId,
         userId: 'system',
         action: 'System Seed Initialized',
         entityType: 'System',
@@ -547,7 +845,7 @@ class DataStore {
   }
 
   // ================= CONTACTS =================
-  addContact(contactData: Omit<Contact, 'id' | 'organizationId' | 'createdAt' | 'updatedAt'>): Contact {
+  addContact(contactData: Omit<Contact, 'id' | 'organizationId' | 'createdAt' | 'updatedAt' | 'clientId'> & { clientId?: string }): Contact {
     const sanitized = sanitizeContactRecord(contactData);
     const norm = normalizePhoneNumber(sanitized.phone || '');
     const cleanPhone = norm.isValid ? norm.normalized : (sanitized.phone || '');
@@ -558,6 +856,7 @@ class DataStore {
       id,
       phone: cleanPhone,
       organizationId: this.orgId,
+      clientId: sanitized.clientId || this.activeClientId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -721,6 +1020,7 @@ class DataStore {
         const newContact: Contact = {
           id,
           organizationId: this.orgId,
+          clientId: this.activeClientId,
           firstName: sanitized.firstName || '',
           lastName: sanitized.lastName || '',
           phone: normalizedPhone,
@@ -772,6 +1072,7 @@ class DataStore {
     const group: ContactGroup = {
       id,
       organizationId: this.orgId,
+      clientId: this.activeClientId,
       name,
       description,
       memberCount: 0,
@@ -828,6 +1129,7 @@ class DataStore {
       ...tplData,
       id,
       organizationId: this.orgId,
+      clientId: (tplData as any).clientId || this.activeClientId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -976,6 +1278,7 @@ class DataStore {
       const liveCampaign: Campaign = {
         id: campaignId,
         organizationId: this.orgId,
+        clientId: this.activeClientId,
         name: data.name,
         campaignType,
         templateId: template.id,
@@ -1005,6 +1308,7 @@ class DataStore {
           id: `rcp_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
           campaignId,
           organizationId: this.orgId,
+          clientId: this.activeClientId,
           contactId: rcp.contactId,
           phone: rcp.phone,
           normalizedPhone: rcp.normalizedPhone,
@@ -1030,6 +1334,7 @@ class DataStore {
             conv = {
               id: `cnv_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
               organizationId: this.orgId,
+              clientId: this.activeClientId,
               contactId: rcp.contactId,
               contactPhone: rcp.phone,
               contactName: rcp.contactName,
@@ -1051,6 +1356,7 @@ class DataStore {
             id: `msg_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
             conversationId: conv.id,
             organizationId: this.orgId,
+            clientId: this.activeClientId,
             contactId: rcp.contactId,
             direction: 'outgoing',
             senderType: 'broadcast',
@@ -1086,6 +1392,7 @@ class DataStore {
     const campaign: Campaign = {
       id: campaignId,
       organizationId: this.orgId,
+      clientId: this.activeClientId,
       name: data.name,
       campaignType,
       templateId: template.id,
@@ -1139,6 +1446,7 @@ class DataStore {
         id: `rcp_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
         campaignId,
         organizationId: this.orgId,
+        clientId: this.activeClientId,
         contactId: c.id,
         phone: c.phone,
         normalizedPhone: normalizePhoneNumber(c.phone).normalized || c.phone,
@@ -1165,6 +1473,7 @@ class DataStore {
         conv = {
           id: `cnv_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
           organizationId: this.orgId,
+          clientId: this.activeClientId,
           contactId: c.id,
           contactPhone: c.phone,
           contactName: `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.phone,
@@ -1188,6 +1497,7 @@ class DataStore {
         id: `msg_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
         conversationId: conv.id,
         organizationId: this.orgId,
+        clientId: this.activeClientId,
         contactId: c.id,
         direction: 'outgoing',
         senderType: 'broadcast',
@@ -1277,6 +1587,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
+        clientId: conv.clientId || this.activeClientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1317,6 +1628,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
+        clientId: conv.clientId || this.activeClientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1426,6 +1738,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
+        clientId: conv.clientId || this.activeClientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1466,6 +1779,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
+        clientId: conv.clientId || this.activeClientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1542,6 +1856,7 @@ class DataStore {
         conv = {
           id: `cnv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           organizationId: this.orgId,
+          clientId: contact.clientId || this.activeClientId,
           contactId: contact.id,
           contactPhone: `+${normRecipient}`,
           contactName: `${contact.firstName} ${contact.lastName}`.trim() || `+${normRecipient}`,
@@ -1563,6 +1878,7 @@ class DataStore {
         id: `msg_hello_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         conversationId: conv.id,
         organizationId: this.orgId,
+        clientId: conv.clientId || contact.clientId || this.activeClientId,
         contactId: contact.id,
         direction: 'outgoing',
         senderType: 'agent',
@@ -1642,6 +1958,7 @@ class DataStore {
       conv = {
         id: `cnv_${Date.now()}`,
         organizationId: this.orgId,
+        clientId: contact.clientId || this.activeClientId,
         contactId: contact.id,
         contactPhone: contact.phone,
         contactName: `${contact.firstName} ${contact.lastName}`.trim() || contact.phone,
@@ -1666,6 +1983,7 @@ class DataStore {
       id: `msg_in_${Date.now()}`,
       conversationId: conv.id,
       organizationId: this.orgId,
+      clientId: conv.clientId || contact.clientId || this.activeClientId,
       contactId: contact.id,
       direction: 'incoming',
       senderType: 'customer',
@@ -1717,6 +2035,7 @@ class DataStore {
           id: `msg_auto_${Date.now()}`,
           conversationId: conv.id,
           organizationId: this.orgId,
+          clientId: conv.clientId || contact.clientId || this.activeClientId,
           contactId: contact.id,
           direction: 'outgoing',
           senderType: 'automation',
@@ -1760,6 +2079,7 @@ class DataStore {
       ...ruleData,
       id,
       organizationId: this.orgId,
+      clientId: (ruleData as any).clientId || this.activeClientId,
       triggerCount: 0,
       createdAt: new Date().toISOString(),
     };
@@ -1793,6 +2113,7 @@ class DataStore {
     const log: AuditLog = {
       id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       organizationId: this.orgId,
+      clientId: this.activeClientId,
       userId: 'current_user',
       action,
       entityType,
@@ -1807,6 +2128,7 @@ class DataStore {
   logConsentChange(params: {
     contactId: string;
     organizationId?: string;
+    clientId?: string;
     previousStatus: string;
     newStatus: string;
     source: string;
@@ -1818,6 +2140,7 @@ class DataStore {
     const hist: OptInHistoryEvent = {
       id: `opt_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       organizationId: params.organizationId || this.orgId,
+      clientId: params.clientId || this.activeClientId,
       contactId: params.contactId,
       phone: params.phone || '',
       previousStatus: params.previousStatus,

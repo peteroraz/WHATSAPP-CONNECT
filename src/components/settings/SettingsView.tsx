@@ -86,7 +86,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const webhookUrl = `${window.location.origin}/api/whatsapp/webhook`;
-  const webhookVerifyToken = 'whatsflow_verify_token_prod_2025';
 
   // Safely check status on startup without requiring secrets
   useEffect(() => {
@@ -698,21 +697,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Webhook Verify Token (hub.verify_token)
                 </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={webhookVerifyToken}
-                    className="flex-1 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => copyToClipboard(webhookVerifyToken, 'token')}
-                    className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1 shadow-2xs"
-                  >
-                    {copiedKey === 'token' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                    Copy Token
-                  </button>
+                <div className="flex items-center">
+                  <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-700 flex items-center justify-between">
+                    <span className="tracking-widest font-bold text-slate-800">••••••••••••</span>
+                    <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-md border border-emerald-200">
+                      Configured
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>

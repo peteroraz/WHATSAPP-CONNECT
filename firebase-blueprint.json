@@ -42,12 +42,52 @@
       },
       "required": ["organizationId", "userId", "role"]
     },
+    "Client": {
+      "title": "Client",
+      "description": "Third-party business client managed by an organization",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "name": { "type": "string" },
+        "code": { "type": "string" },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "description": { "type": "string" },
+        "contactName": { "type": "string" },
+        "contactEmail": { "type": "string" },
+        "contactPhone": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["organizationId", "name", "code", "status"]
+    },
+    "WhatsAppConnection": {
+      "title": "WhatsAppConnection",
+      "description": "WhatsApp connection metadata for a client",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
+        "label": { "type": "string" },
+        "displayPhoneNumber": { "type": "string" },
+        "verifiedDisplayName": { "type": "string" },
+        "wabaIdMasked": { "type": "string" },
+        "phoneNumberIdMasked": { "type": "string" },
+        "apiVersion": { "type": "string" },
+        "connectionStatus": { "type": "string", "enum": ["Not Configured", "Connected", "Connection Error"] },
+        "isDefault": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["organizationId", "clientId", "label", "connectionStatus"]
+    },
     "Contact": {
       "title": "Contact",
       "description": "Customer contact record",
       "type": "object",
       "properties": {
         "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
         "firstName": { "type": "string" },
         "lastName": { "type": "string" },
         "phone": { "type": "string" },
@@ -67,6 +107,7 @@
       "type": "object",
       "properties": {
         "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
         "name": { "type": "string" },
         "description": { "type": "string" }
       },
@@ -78,6 +119,7 @@
       "type": "object",
       "properties": {
         "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
         "name": { "type": "string" },
         "language": { "type": "string" },
         "category": { "type": "string", "enum": ["Marketing", "Utility", "Authentication"] },
@@ -92,6 +134,7 @@
       "type": "object",
       "properties": {
         "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
         "name": { "type": "string" },
         "templateId": { "type": "string" },
         "status": { "type": "string", "enum": ["Draft", "Scheduled", "Queued", "Sending", "Completed", "Partially Completed", "Cancelled"] }
@@ -104,6 +147,7 @@
       "type": "object",
       "properties": {
         "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
         "contactPhone": { "type": "string" },
         "status": { "type": "string", "enum": ["Open", "Closed"] }
       },
@@ -116,6 +160,7 @@
       "properties": {
         "conversationId": { "type": "string" },
         "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
         "direction": { "type": "string", "enum": ["incoming", "outgoing"] },
         "body": { "type": "string" },
         "status": { "type": "string" }
@@ -128,6 +173,7 @@
       "type": "object",
       "properties": {
         "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
         "name": { "type": "string" },
         "trigger": { "type": "string" },
         "actionType": { "type": "string" },
@@ -148,6 +194,14 @@
     "/organization_memberships/{membershipId}": {
       "schema": "OrganizationMembership",
       "description": "Organization membership mapping"
+    },
+    "/clients/{clientId}": {
+      "schema": "Client",
+      "description": "Clients belonging to organizations"
+    },
+    "/whatsapp_connections/{connectionId}": {
+      "schema": "WhatsAppConnection",
+      "description": "WhatsApp connection metadata per client"
     },
     "/contacts/{contactId}": {
       "schema": "Contact",

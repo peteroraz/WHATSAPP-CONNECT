@@ -5,6 +5,7 @@ import { Organization, UserProfile } from './types/index.ts';
 import { ToastProvider, useToast } from './components/common/Toast.tsx';
 import { AppLayout, ActiveTab } from './components/layout/AppLayout.tsx';
 import { DashboardView } from './components/dashboard/DashboardView.tsx';
+import { ClientsView } from './components/clients/ClientsView.tsx';
 import { ContactsView } from './components/contacts/ContactsView.tsx';
 import { BroadcastsView } from './components/broadcasts/BroadcastsView.tsx';
 import { InboxView } from './components/inbox/InboxView.tsx';
@@ -59,6 +60,14 @@ function MainApp({ onNavigate }: MainAppProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (currentTab === 'inbox' && selectedConversationId) {
+      dataStore.setActiveConversationId(selectedConversationId);
+    } else if (currentTab !== 'inbox') {
+      dataStore.setActiveConversationId(null);
+    }
+  }, [selectedConversationId, currentTab]);
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -83,7 +92,19 @@ function MainApp({ onNavigate }: MainAppProps) {
     );
   }
 
-  const unreadCount = dataStore.conversations.reduce(
+  const activeClientId = dataStore.activeClientId;
+
+  // Client-scoped collections for operational screens (Requirement 8)
+  const clientContacts = dataStore.contacts.filter((c) => c.clientId === activeClientId);
+  const clientGroups = dataStore.groups.filter((g) => g.clientId === activeClientId);
+  const clientTemplates = dataStore.templates.filter((t) => t.clientId === activeClientId);
+  const clientCampaigns = dataStore.campaigns.filter((c) => c.clientId === activeClientId);
+  const clientConversations = dataStore.conversations.filter((c) => c.clientId === activeClientId);
+  const clientMessages = dataStore.messages.filter((m) => m.clientId === activeClientId);
+  const clientAutomationRules = dataStore.automationRules.filter((r) => r.clientId === activeClientId);
+  const clientOptInHistory = dataStore.optInHistory.filter((h) => h.clientId === activeClientId);
+
+  const unreadCount = clientConversations.reduce(
     (acc, c) => acc + (c.unreadCount || 0),
     0
   );
@@ -112,6 +133,9 @@ function MainApp({ onNavigate }: MainAppProps) {
       organization={effectiveOrg}
       user={currentUser}
       unreadMessagesCount={unreadCount}
+      clients={dataStore.clients}
+      activeClientId={dataStore.activeClientId}
+      onSelectClient={(clientId) => dataStore.setActiveClient(clientId)}
       onLogout={handleLogout}
       onOpenSimulator={() => setIsSimulatorOpen(true)}
       onResetDemoData={handleResetDemoData}
@@ -119,10 +143,10 @@ function MainApp({ onNavigate }: MainAppProps) {
     >
       {currentTab === 'dashboard' && (
         <DashboardView
-          contacts={dataStore.contacts}
-          campaigns={dataStore.campaigns}
-          conversations={dataStore.conversations}
-          automationRules={dataStore.automationRules}
+          contacts={clientContacts}
+          campaigns={clientCampaigns}
+          conversations={clientConversations}
+          automationRules={clientAutomationRules}
           whatsappConnected={isWhatsAppConnected}
           onNavigateTab={(tab) => setCurrentTab(tab)}
           onSelectConversation={(convId) => {
@@ -132,11 +156,27 @@ function MainApp({ onNavigate }: MainAppProps) {
         />
       )}
 
+      {currentTab === 'clients' && (
+        <ClientsView
+          clients={dataStore.clients}
+          activeClientId={dataStore.activeClientId}
+          contacts={dataStore.contacts}
+          campaigns={dataStore.campaigns}
+          conversations={dataStore.conversations}
+          whatsappConnections={dataStore.whatsappConnections}
+          isWhatsAppConnected={isWhatsAppConnected}
+          onSelectActiveClient={(id) => dataStore.setActiveClient(id)}
+          onAddClient={(data) => dataStore.addClient(data)}
+          onUpdateClient={(id, updates) => dataStore.updateClient(id, updates)}
+          onToggleClientStatus={(id) => dataStore.toggleClientStatus(id)}
+        />
+      )}
+
       {currentTab === 'contacts' && (
         <ContactsView
-          contacts={dataStore.contacts}
-          groups={dataStore.groups}
-          optInHistory={dataStore.optInHistory}
+          contacts={clientContacts}
+          groups={clientGroups}
+          optInHistory={clientOptInHistory}
           onAddContact={(data) => dataStore.addContact(data)}
           onUpdateContact={(id, updates) => dataStore.updateContact(id, updates)}
           onDeleteContact={(id) => dataStore.deleteContact(id)}
@@ -151,10 +191,10 @@ function MainApp({ onNavigate }: MainAppProps) {
 
       {currentTab === 'broadcasts' && (
         <BroadcastsView
-          campaigns={dataStore.campaigns}
-          contacts={dataStore.contacts}
-          groups={dataStore.groups}
-          templates={dataStore.templates}
+          campaigns={clientCampaigns}
+          contacts={clientContacts}
+          groups={clientGroups}
+          templates={clientTemplates}
           isWhatsAppConnected={isWhatsAppConnected}
           onLaunchCampaign={(data) => dataStore.createAndSendCampaign(data)}
         />
@@ -162,11 +202,11 @@ function MainApp({ onNavigate }: MainAppProps) {
 
       {currentTab === 'inbox' && (
         <InboxView
-          conversations={dataStore.conversations}
-          messages={dataStore.messages}
-          contacts={dataStore.contacts}
+          conversations={clientConversations}
+          messages={clientMessages}
+          contacts={clientContacts}
           organization={effectiveOrg}
-          templates={dataStore.templates}
+          templates={clientTemplates}
           selectedConversationId={selectedConversationId}
           onSelectConversation={(id) => {
             setSelectedConversationId(id);
@@ -180,12 +220,13 @@ function MainApp({ onNavigate }: MainAppProps) {
           }
           onToggleStatus={(convId) => dataStore.toggleConversationStatus(convId)}
           onOpenSimulator={() => setIsSimulatorOpen(true)}
+          onRefreshEvents={() => dataStore.pollEvents()}
         />
       )}
 
       {currentTab === 'automations' && (
         <AutomationsView
-          rules={dataStore.automationRules}
+          rules={clientAutomationRules}
           onAddRule={(data) => dataStore.addAutomationRule(data)}
           onUpdateRule={(id, updates) => dataStore.updateAutomationRule(id, updates)}
           onDeleteRule={(id) => dataStore.deleteAutomationRule(id)}
@@ -195,7 +236,7 @@ function MainApp({ onNavigate }: MainAppProps) {
 
       {currentTab === 'templates' && (
         <TemplatesView
-          templates={dataStore.templates}
+          templates={clientTemplates}
           onAddTemplate={(data) => dataStore.addTemplate(data)}
           onSyncMetaTemplates={() => dataStore.syncTemplatesFromMeta()}
           isWhatsAppConnected={isWhatsAppConnected}
@@ -218,7 +259,7 @@ function MainApp({ onNavigate }: MainAppProps) {
       <SimulatorModal
         isOpen={isSimulatorOpen}
         onClose={() => setIsSimulatorOpen(false)}
-        contacts={dataStore.contacts}
+        contacts={clientContacts}
         organization={effectiveOrg}
         onSimulateIncoming={(phone, text) =>
           dataStore.processSimulatedIncoming(phone, text, effectiveOrg)

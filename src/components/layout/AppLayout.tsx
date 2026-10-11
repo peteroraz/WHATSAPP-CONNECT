@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { 
   LayoutDashboard, 
+  Building2,
   Users, 
   Send, 
   Inbox, 
@@ -13,14 +14,16 @@ import {
   Radio,
   RotateCcw,
   Sparkles,
-  Bot
+  Bot,
+  ChevronDown
 } from 'lucide-react';
-import { Organization, UserProfile } from '../../types/index.ts';
+import { Organization, UserProfile, Client } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { AppLogo } from '../common/AppLogo.tsx';
 
 export type ActiveTab = 
   | 'dashboard' 
+  | 'clients'
   | 'contacts' 
   | 'broadcasts' 
   | 'inbox' 
@@ -34,6 +37,9 @@ export interface AppLayoutProps {
   organization: Organization;
   user: UserProfile;
   unreadMessagesCount: number;
+  clients?: Client[];
+  activeClientId?: string;
+  onSelectClient?: (clientId: string) => void;
   onLogout: () => void;
   onOpenSimulator: () => void;
   onResetDemoData: () => void;
@@ -47,6 +53,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   organization,
   user,
   unreadMessagesCount,
+  clients = [],
+  activeClientId = '',
+  onSelectClient,
   onLogout,
   onOpenSimulator,
   onResetDemoData,
@@ -65,6 +74,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 
   const navItems: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'clients', label: 'Clients', icon: Building2 },
     { id: 'contacts', label: 'Contacts', icon: Users },
     { id: 'broadcasts', label: 'Broadcasts', icon: Send },
     { 
@@ -82,6 +92,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
     onSelectTab(tab);
     setMobileMenuOpen(false);
   };
+
+  const activeClients = clients.filter((c) => c.status === 'Active');
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row text-slate-800 antialiased font-sans">
@@ -142,6 +154,32 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
               <span className="text-xs text-slate-500">
                 {organization.whatsappConnected ? 'WhatsApp Live' : 'Dev / Demo Mode'}
               </span>
+            </div>
+
+            {/* Client selector underneath organization card (Requirement 6) */}
+            <div className="pt-2.5 mt-2.5 border-t border-slate-200/70">
+              <label htmlFor="sidebar-client-select" className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                Client
+              </label>
+              <div className="relative">
+                <select
+                  id="sidebar-client-select"
+                  value={activeClientId}
+                  onChange={(e) => onSelectClient?.(e.target.value)}
+                  className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-lg px-2.5 py-1.5 pr-7 font-medium appearance-none hover:border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 cursor-pointer truncate shadow-2xs"
+                  title="Switch Active Client"
+                >
+                  {activeClients.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                  {activeClients.length === 0 && (
+                    <option value="">No Active Clients</option>
+                  )}
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
+              </div>
             </div>
           </div>
         </div>

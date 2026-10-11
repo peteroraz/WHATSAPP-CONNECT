@@ -8,7 +8,7 @@ import type {
   AutomationRule 
 } from '../types/index.ts';
 
-export function getInitialSeedData(orgId: string): {
+export function getInitialSeedData(orgId: string, clientId?: string): {
   contacts: Contact[];
   groups: ContactGroup[];
   templates: MessageTemplate[];
@@ -22,7 +22,7 @@ export function getInitialSeedData(orgId: string): {
   const pastDays = (d: number) => new Date(now.getTime() - d * 86400 * 1000).toISOString();
 
   // Contact Groups
-  const groups: ContactGroup[] = [
+  const groups: Omit<ContactGroup, 'clientId'>[] = [
     {
       id: `grp_customers_${orgId}`,
       organizationId: orgId,
@@ -62,7 +62,7 @@ export function getInitialSeedData(orgId: string): {
   ];
 
   // Contacts
-  const contacts: Contact[] = [
+  const contacts: Omit<Contact, 'clientId'>[] = [
     {
       id: `cnt_john_${orgId}`,
       organizationId: orgId,
@@ -235,7 +235,7 @@ export function getInitialSeedData(orgId: string): {
   ];
 
   // Templates
-  const templates: MessageTemplate[] = [
+  const templates: Omit<MessageTemplate, 'clientId'>[] = [
     {
       id: `tpl_hello_world_${orgId}`,
       organizationId: orgId,
@@ -334,7 +334,7 @@ export function getInitialSeedData(orgId: string): {
   ];
 
   // Campaigns
-  const campaigns: Campaign[] = [
+  const campaigns: Omit<Campaign, 'clientId'>[] = [
     {
       id: `cmp_vip_preview_${orgId}`,
       organizationId: orgId,
@@ -386,7 +386,7 @@ export function getInitialSeedData(orgId: string): {
   const convDavidId = `cnv_david_${orgId}`;
   const convIbrahimId = `cnv_ibrahim_${orgId}`;
 
-  const conversations: Conversation[] = [
+  const conversations: Omit<Conversation, 'clientId'>[] = [
     {
       id: convJohnId,
       organizationId: orgId,
@@ -448,7 +448,7 @@ export function getInitialSeedData(orgId: string): {
     },
   ];
 
-  const messages: Message[] = [
+  const messages: Omit<Message, 'clientId'>[] = [
     // John's conversation
     {
       id: `msg_j1_${orgId}`,
@@ -570,7 +570,7 @@ export function getInitialSeedData(orgId: string): {
   ];
 
   // Automation Rules
-  const automationRules: AutomationRule[] = [
+  const automationRules: Omit<AutomationRule, 'clientId'>[] = [
     {
       id: `rul_price_${orgId}`,
       organizationId: orgId,
@@ -621,13 +621,15 @@ export function getInitialSeedData(orgId: string): {
     },
   ];
 
+  const targetClientId = clientId || `client_default_${orgId}`;
+
   return {
-    contacts,
-    groups,
-    templates,
-    campaigns,
-    conversations,
-    messages,
-    automationRules,
+    contacts: contacts.map((c) => ({ ...c, clientId: targetClientId })),
+    groups: groups.map((g) => ({ ...g, clientId: targetClientId })),
+    templates: templates.map((t) => ({ ...t, clientId: targetClientId })),
+    campaigns: campaigns.map((c) => ({ ...c, clientId: targetClientId })),
+    conversations: conversations.map((c) => ({ ...c, clientId: targetClientId })),
+    messages: messages.map((m) => ({ ...m, clientId: targetClientId })),
+    automationRules: automationRules.map((r) => ({ ...r, clientId: targetClientId })),
   };
 }

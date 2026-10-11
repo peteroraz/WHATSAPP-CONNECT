@@ -43,6 +43,40 @@ export interface OrganizationMembership {
   createdAt: string;
 }
 
+export interface Client {
+  id: string;
+  organizationId: string;
+  name: string;
+  code: string;
+  status: 'Active' | 'Inactive';
+  description?: string;
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  logoUrl?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WhatsAppConnection {
+  id: string;
+  organizationId: string;
+  clientId: string;
+  label: string;
+  displayPhoneNumber?: string;
+  verifiedDisplayName?: string;
+  wabaIdMasked?: string;
+  phoneNumberIdMasked?: string;
+  apiVersion?: string;
+  connectionStatus:
+    | 'Not Configured'
+    | 'Connected'
+    | 'Connection Error';
+  isDefault?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type ContactStatus = 'Active' | 'Opted Out' | 'Invalid' | 'Blocked';
 
 export type ConsentStatus = 'Not Consented' | 'Marketing Consented' | 'Transactional Only' | 'Opted Out';
@@ -50,6 +84,7 @@ export type ConsentStatus = 'Not Consented' | 'Marketing Consented' | 'Transacti
 export interface Contact {
   id: string;
   organizationId: string;
+  clientId: string;
   firstName: string;
   lastName: string;
   phone: string; // E.164 format (+234...)
@@ -75,6 +110,7 @@ export interface Contact {
 export interface ContactGroup {
   id: string;
   organizationId: string;
+  clientId: string;
   name: string;
   description: string;
   memberCount: number;
@@ -88,6 +124,7 @@ export type TemplateStatus = 'Approved' | 'Pending' | 'Rejected' | 'Paused';
 export interface MessageTemplate {
   id: string;
   organizationId: string;
+  clientId: string;
   name: string;
   language: string;
   category: TemplateCategory;
@@ -117,6 +154,7 @@ export type CampaignType = 'Marketing' | 'Utility';
 export interface Campaign {
   id: string;
   organizationId: string;
+  clientId: string;
   name: string;
   campaignType?: CampaignType;
   templateId: string;
@@ -154,6 +192,7 @@ export interface CampaignRecipient {
   id: string;
   campaignId: string;
   organizationId: string;
+  clientId: string;
   contactId: string;
   phone: string;
   normalizedPhone?: string;
@@ -178,6 +217,7 @@ export type ConversationStatus = 'Open' | 'Closed';
 export interface Conversation {
   id: string;
   organizationId: string;
+  clientId: string;
   contactId: string;
   contactPhone: string;
   contactName: string;
@@ -200,6 +240,7 @@ export interface Message {
   id: string;
   conversationId: string;
   organizationId: string;
+  clientId: string;
   contactId: string;
   recipient?: string;
   direction: MessageDirection;
@@ -233,6 +274,7 @@ export type AutomationAction =
 export interface AutomationRule {
   id: string;
   organizationId: string;
+  clientId: string;
   name: string;
   trigger: AutomationTrigger;
   conditionType: ConditionType;
@@ -250,6 +292,7 @@ export interface AutomationRule {
 export interface OptInHistoryEvent {
   id: string;
   organizationId: string;
+  clientId: string;
   contactId: string;
   phone: string;
   previousStatus?: string;
@@ -265,6 +308,7 @@ export interface OptInHistoryEvent {
 export interface AuditLog {
   id: string;
   organizationId: string;
+  clientId: string;
   userId: string;
   userEmail?: string;
   action: string;

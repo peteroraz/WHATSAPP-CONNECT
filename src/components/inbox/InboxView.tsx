@@ -15,13 +15,16 @@ import {
   Sparkles,
   FileText,
   AlertTriangle,
-  X
+  X,
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import { Conversation, Message, Contact, Organization, MessageTemplate } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { EmptyState } from '../common/EmptyState.tsx';
 import { Modal } from '../common/Modal.tsx';
 import { useToast } from '../common/Toast.tsx';
+import { dataStore } from '../../services/dataStore.ts';
 
 export interface InboxViewProps {
   conversations: Conversation[];
@@ -39,6 +42,7 @@ export interface InboxViewProps {
   ) => Promise<any>;
   onToggleStatus: (conversationId: string) => void;
   onOpenSimulator: () => void;
+  onRefreshEvents?: () => Promise<void> | void;
 }
 
 export const InboxView: React.FC<InboxViewProps> = ({
@@ -53,16 +57,22 @@ export const InboxView: React.FC<InboxViewProps> = ({
   onSendTemplateMessage,
   onToggleStatus,
   onOpenSimulator,
+  onRefreshEvents,
 }) => {
   const { toast } = useToast();
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'Open' | 'Closed'>('ALL');
   const [replyText, setReplyText] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({});
+  
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+  const prevSelectedConversationIdRef = useRef<string | null>(null);
 
   // Auto-select first conversation if none selected
   useEffect(() => {
@@ -71,44 +81,87 @@ export const InboxView: React.FC<InboxViewProps> = ({
     }
   }, [selectedConversationId, conversations, onSelectConversation]);
 
-  // Scroll to bottom when messages update
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, selectedConversationId]);
-
-  const filteredConversations = useMemo(() => {
-    return conversations.filter((c) => {
+  // Derived conversations list with newest activity sorted to top, preserving filters
+  const filteredConversations = [...conversations]
+    .filter((c) => {
       if (statusFilter !== 'ALL' && c.status !== statusFilter) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchesName = c.contactName.toLowerCase().includes(q);
-        const matchesPhone = c.contactPhone.toLowerCase().includes(q);
+        const matchesName = (c.contactName || '').toLowerCase().includes(q);
+        const matchesPhone = (c.contactPhone || '').toLowerCase().includes(q);
         const matchesMsg = (c.lastMessage || '').toLowerCase().includes(q);
         if (!matchesName && !matchesPhone && !matchesMsg) return false;
       }
       return true;
+    })
+    .sort((a, b) => {
+      const timeA = new Date(a.lastMessageAt || a.createdAt || 0).getTime();
+      const timeB = new Date(b.lastMessageAt || b.createdAt || 0).getTime();
+      return timeB - timeA;
     });
-  }, [conversations, statusFilter, searchQuery]);
 
-  const activeConversation = useMemo(() => {
-    return conversations.find((c) => c.id === selectedConversationId) || null;
-  }, [conversations, selectedConversationId]);
+  // Direct derived calculations for active chat entities without stale memoization
+  const activeConversation = conversations.find((c) => c.id === selectedConversationId) || null;
 
-  const activeContact = useMemo(() => {
-    if (!activeConversation) return null;
-    return contacts.find(
-      (c) =>
-        c.id === activeConversation.contactId ||
-        c.phone.replace(/\D/g, '') === activeConversation.contactPhone.replace(/\D/g, '')
-    ) || null;
-  }, [activeConversation, contacts]);
+  const activeContact = activeConversation
+    ? contacts.find(
+        (c) =>
+          c.id === activeConversation.contactId ||
+          c.phone.replace(/\D/g, '') === activeConversation.contactPhone.replace(/\D/g, '')
+      ) || null
+    : null;
 
-  const activeMessages = useMemo(() => {
-    if (!selectedConversationId) return [];
-    return messages
-      .filter((m) => m.conversationId === selectedConversationId)
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  }, [messages, selectedConversationId]);
+  // Active messages copied before sorting to avoid mutating props
+  const activeMessages = selectedConversationId
+    ? [...messages]
+        .filter((m) => m.conversationId === selectedConversationId)
+        .sort((a, b) => new Date(a.timestamp || a.createdAt || 0).getTime() - new Date(b.timestamp || b.createdAt || 0).getTime())
+    : [];
+
+  // Track latest message key for reliable auto-scroll
+  const latestMessage = activeMessages.length > 0 ? activeMessages[activeMessages.length - 1] : null;
+  const latestMessageKey = latestMessage ? `${latestMessage.id}_${latestMessage.timestamp}` : '';
+
+  const handleMessagesScroll = () => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const threshold = 120; // px threshold from bottom
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    isNearBottomRef.current = distanceFromBottom <= threshold;
+  };
+
+  // Reliable chat auto-scroll
+  useEffect(() => {
+    const isNewConversation = prevSelectedConversationIdRef.current !== selectedConversationId;
+    prevSelectedConversationIdRef.current = selectedConversationId;
+
+    if (isNewConversation) {
+      isNearBottomRef.current = true;
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    } else if (isNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [latestMessageKey, selectedConversationId]);
+
+  // Clear unread count when active conversation is visible in Inbox
+  useEffect(() => {
+    if (activeConversation && activeConversation.unreadCount > 0) {
+      dataStore.markConversationAsRead(activeConversation.id);
+    }
+  }, [activeConversation?.id, activeConversation?.unreadCount]);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      if (onRefreshEvents) {
+        await onRefreshEvents();
+      } else {
+        await dataStore.pollEvents();
+      }
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 600);
+    }
+  };
 
   // 24-Hour WhatsApp Customer Care Window calculation
   // Determined from the latest real incoming customer message timestamp
@@ -189,7 +242,19 @@ export const InboxView: React.FC<InboxViewProps> = ({
         {/* Search and Filters Header */}
         <div className="p-3.5 border-b border-slate-200 bg-white space-y-2.5">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold text-slate-900">Conversations</h2>
+            <div className="flex items-center gap-1.5">
+              <h2 className="text-sm font-bold text-slate-900">Conversations</h2>
+              <button
+                id="inbox-refresh-events-btn"
+                type="button"
+                onClick={handleManualRefresh}
+                disabled={isRefreshing}
+                title="Refresh conversations & events"
+                className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-emerald-600' : ''}`} />
+              </button>
+            </div>
             {!organization.whatsappConnected && (
               <button
                 id="inbox-simulator-btn"
@@ -379,7 +444,11 @@ export const InboxView: React.FC<InboxViewProps> = ({
             </div>
 
             {/* Messages Scroll Area */}
-            <div className="flex-1 p-4 overflow-y-auto space-y-3">
+            <div
+              ref={messagesContainerRef}
+              onScroll={handleMessagesScroll}
+              className="flex-1 p-4 overflow-y-auto space-y-3"
+            >
               {activeMessages.length === 0 ? (
                 <div className="text-center py-12 text-xs text-slate-400">
                   No message history for this contact.
@@ -548,10 +617,14 @@ export const InboxView: React.FC<InboxViewProps> = ({
                     id="chat-send-btn"
                     type="submit"
                     disabled={isSending || !replyText.trim()}
-                    className="p-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg transition-colors shadow-xs"
+                    className="p-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg transition-colors shadow-xs flex items-center justify-center min-w-[38px] min-h-[38px]"
                     title="Send WhatsApp Message"
                   >
-                    <Send className="w-4 h-4" />
+                    {isSending ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    ) : (
+                      <Send className="w-4 h-4" />
+                    )}
                   </button>
                 </form>
               )}

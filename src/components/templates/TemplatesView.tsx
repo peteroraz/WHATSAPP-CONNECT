@@ -31,6 +31,13 @@ export const TemplatesView: React.FC<TemplatesViewProps> = ({
   const { toast } = useToast();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('whatsflow_last_template_sync');
+    } catch {
+      return null;
+    }
+  });
   const [categoryFilter, setCategoryFilter] = useState('ALL');
 
   const filteredTemplates = templates.filter((t) => {
@@ -50,6 +57,11 @@ export const TemplatesView: React.FC<TemplatesViewProps> = ({
       const res = await onSyncMetaTemplates();
       setIsSyncing(false);
       if (res && res.success) {
+        const syncTime = new Date().toLocaleString();
+        setLastSyncedAt(syncTime);
+        try {
+          localStorage.setItem('whatsflow_last_template_sync', syncTime);
+        } catch {}
         toast(`Synchronized ${res.count} template(s) from WhatsApp Business Account.`);
       } else {
         toast(res?.error || 'Failed to sync templates from Meta.', 'error');
@@ -71,29 +83,36 @@ export const TemplatesView: React.FC<TemplatesViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          {onSyncMetaTemplates && (
-            <button
-              id="sync-meta-templates-btn"
-              type="button"
-              onClick={handleSyncMeta}
-              disabled={isSyncing}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-lg border border-emerald-200 shadow-2xs transition-colors"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-              {isSyncing ? 'Syncing Templates...' : 'Sync Templates from Meta'}
-            </button>
-          )}
+        <div className="flex flex-col sm:items-end gap-1.5">
+          <div className="flex items-center gap-2">
+            {onSyncMetaTemplates && (
+              <button
+                id="sync-meta-templates-btn"
+                type="button"
+                onClick={handleSyncMeta}
+                disabled={isSyncing}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-lg border border-emerald-200 shadow-2xs transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                {isSyncing ? 'Syncing Templates...' : 'Sync Templates from Meta'}
+              </button>
+            )}
 
-          <button
-            id="open-create-template-btn"
-            type="button"
-            onClick={() => setIsModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Create Template
-          </button>
+            <button
+              id="open-create-template-btn"
+              type="button"
+              onClick={() => setIsModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Create Template
+            </button>
+          </div>
+          {lastSyncedAt && (
+            <span className="text-[11px] text-slate-500 font-medium">
+              Last synced from Meta: {lastSyncedAt}
+            </span>
+          )}
         </div>
       </div>
 
