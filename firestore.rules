@@ -31,6 +31,16 @@ service cloud.firestore {
       allow delete: if isAuthenticated();
     }
 
+    // Clients
+    match /clients/{clientId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // WhatsApp Connections
+    match /whatsapp_connections/{connectionId} {
+      allow read, write: if isAuthenticated();
+    }
+
     // Contacts
     match /contacts/{contactId} {
       allow read, write: if isAuthenticated();

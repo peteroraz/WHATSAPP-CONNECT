@@ -93,6 +93,37 @@ class DataStore {
     return this.clients.find((c) => c.id === this.activeClientId) || null;
   }
 
+  private requireActiveClientId(): string {
+    const client = this.clients.find(
+      (c) => c.id === this.activeClientId && c.status === 'Active'
+    );
+
+    if (!client) {
+      throw new Error(
+        'Please select an active Client before creating this record.'
+      );
+    }
+
+    return client.id;
+  }
+
+  getDefaultWhatsAppClientId(): string {
+    const defaultConn = this.whatsappConnections.find((c) => c.isDefault);
+    if (defaultConn && defaultConn.clientId) {
+      return defaultConn.clientId;
+    }
+    const defaultClient = this.clients.find((c) => c.code === 'DEFAULT');
+    if (defaultClient) {
+      return defaultClient.id;
+    }
+    const fallbackId = `client_default_${this.orgId}`;
+    const fallbackClient = this.clients.find((c) => c.id === fallbackId);
+    if (fallbackClient) {
+      return fallbackClient.id;
+    }
+    return this.clients[0]?.id || fallbackId;
+  }
+
   addClient(clientData: Omit<Client, 'id' | 'organizationId' | 'createdAt' | 'updatedAt'>): Client {
     const id = `client_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
@@ -302,6 +333,31 @@ class DataStore {
     }
   }
 
+  private migrateMissingClientIds(defaultClientId: string) {
+    const patchRecords = <T extends { id: string; clientId?: string }>(
+      records: T[],
+      collectionName: string
+    ) => {
+      records.forEach((record) => {
+        if (!record.clientId) {
+          record.clientId = defaultClientId;
+          this.persistDoc(collectionName, record.id, { clientId: defaultClientId });
+        }
+      });
+    };
+
+    patchRecords(this.contacts, 'contacts');
+    patchRecords(this.groups, 'contact_groups');
+    patchRecords(this.templates, 'message_templates');
+    patchRecords(this.campaigns, 'campaigns');
+    patchRecords(this.campaignRecipients, 'campaign_recipients');
+    patchRecords(this.conversations, 'conversations');
+    patchRecords(this.messages, 'messages');
+    patchRecords(this.automationRules, 'automation_rules');
+    patchRecords(this.auditLogs, 'audit_logs');
+    patchRecords(this.optInHistory, 'opt_in_history');
+  }
+
   async initialize(organizationId: string) {
     this.orgId = organizationId;
 
@@ -334,24 +390,7 @@ class DataStore {
     const effectiveDefaultClientId = defaultClient.id;
 
     // Safe, idempotent migration: assign Default Client ID to every existing record without a clientId
-    const assignDefaultClient = (records: any[]) => {
-      for (const record of records) {
-        if (!record.clientId) {
-          record.clientId = effectiveDefaultClientId;
-        }
-      }
-    };
-
-    assignDefaultClient(this.contacts);
-    assignDefaultClient(this.groups);
-    assignDefaultClient(this.templates);
-    assignDefaultClient(this.campaigns);
-    assignDefaultClient(this.campaignRecipients);
-    assignDefaultClient(this.conversations);
-    assignDefaultClient(this.messages);
-    assignDefaultClient(this.automationRules);
-    assignDefaultClient(this.auditLogs);
-    assignDefaultClient(this.optInHistory);
+    this.migrateMissingClientIds(effectiveDefaultClientId);
 
     // Default WhatsApp connection metadata (metadata only, no secrets stored)
     if (this.whatsappConnections.length === 0) {
@@ -625,9 +664,12 @@ class DataStore {
             continue;
           }
 
-          let contact = this.contacts.find((c) => arePhoneNumbersEqual(c.phone, fromPhone));
+          const inboundClientId = this.getDefaultWhatsAppClientId();
+
+          let contact = this.contacts.find((c) => c.clientId === inboundClientId && arePhoneNumbersEqual(c.phone, fromPhone));
           if (!contact) {
             contact = this.addContact({
+              clientId: inboundClientId,
               firstName: profileName || 'WhatsApp',
               lastName: profileName ? '' : 'Contact',
               phone: fromPhone,
@@ -643,14 +685,14 @@ class DataStore {
             });
           }
 
-          let conv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, fromPhone));
+          let conv = this.conversations.find((c) => c.clientId === inboundClientId && arePhoneNumbersEqual(c.contactPhone, fromPhone));
           const isCurrentlyActive = Boolean(conv && this.activeConversationId === conv.id);
 
           if (!conv) {
             conv = {
               id: `cnv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               organizationId: this.orgId,
-              clientId: contact.clientId || this.activeClientId,
+              clientId: inboundClientId,
               contactId: contact.id,
               contactPhone: fromPhone,
               contactName: `${contact.firstName} ${contact.lastName}`.trim() || fromPhone,
@@ -662,6 +704,7 @@ class DataStore {
               createdAt: timestamp,
             };
             this.conversations.unshift(conv);
+            this.persistDoc('conversations', conv.id, conv);
           } else {
             conv.lastMessage = text;
             conv.lastMessageAt = timestamp;
@@ -673,13 +716,14 @@ class DataStore {
               conv.unreadCount = (conv.unreadCount || 0) + 1;
             }
             conv.status = 'Open';
+            this.persistDoc('conversations', conv.id, conv);
           }
 
           const inMsg: Message = {
             id: `msg_wamid_${wamid.replace(/[^a-zA-Z0-9]/g, '_')}`,
             conversationId: conv.id,
             organizationId: this.orgId,
-            clientId: conv.clientId || contact.clientId || this.activeClientId,
+            clientId: inboundClientId,
             contactId: contact.id,
             direction: 'incoming',
             senderType: 'customer',
@@ -692,6 +736,7 @@ class DataStore {
             isDemo: false,
           };
           this.messages.push(inMsg);
+          this.persistDoc('messages', inMsg.id, inMsg);
           changed = true;
 
           if (consentEvaluation?.isOptOutCommand) {
@@ -703,6 +748,7 @@ class DataStore {
             });
             this.logConsentChange({
               contactId: contact.id,
+              clientId: inboundClientId,
               phone: contact.phone,
               previousStatus: 'Active',
               newStatus: 'Opted Out',
@@ -716,7 +762,7 @@ class DataStore {
               id: `msg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               conversationId: conv.id,
               organizationId: this.orgId,
-              clientId: conv.clientId || contact.clientId || this.activeClientId,
+              clientId: inboundClientId,
               contactId: contact.id,
               direction: 'outgoing',
               senderType: 'automation',
@@ -728,9 +774,11 @@ class DataStore {
               isDemo: false,
             };
             this.messages.push(outMsg);
+            this.persistDoc('messages', outMsg.id, outMsg);
             conv.lastMessage = autoReplySent;
             conv.lastMessageAt = outMsg.timestamp;
             conv.lastOutgoingMessageAt = outMsg.timestamp;
+            this.persistDoc('conversations', conv.id, conv);
           }
         }
       }
@@ -747,10 +795,12 @@ class DataStore {
 
   async syncAutomationRulesToServer() {
     try {
+      const defaultClientId = this.getDefaultWhatsAppClientId();
+      const rulesToSync = this.automationRules.filter((r) => r.clientId === defaultClientId);
       await fetch('/api/whatsapp/sync-rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rules: this.automationRules }),
+        body: JSON.stringify({ rules: rulesToSync }),
       });
     } catch {}
   }
@@ -768,19 +818,25 @@ class DataStore {
         return { success: true, count: 0 };
       }
 
+      const defaultWhatsAppClientId = this.getDefaultWhatsAppClientId();
+
       for (const tpl of metaTemplates) {
         const existingIdx = this.templates.findIndex(
           (t) => t.whatsappTemplateId === tpl.whatsappTemplateId || t.name === tpl.name
         );
         const metaTpl: MessageTemplate = {
           ...tpl,
+          clientId: defaultWhatsAppClientId,
+          organizationId: this.orgId,
           isLiveMeta: true,
           isDemo: false,
         };
         if (existingIdx >= 0) {
           this.templates[existingIdx] = { ...this.templates[existingIdx], ...metaTpl };
+          this.persistDoc('message_templates', this.templates[existingIdx].id, this.templates[existingIdx]);
         } else {
           this.templates.unshift(metaTpl);
+          this.persistDoc('message_templates', metaTpl.id, metaTpl);
         }
       }
 
@@ -798,17 +854,136 @@ class DataStore {
     }
 
     try {
-      const contactsQuery = query(collection(db, 'contacts'), where('organizationId', '==', this.orgId));
-      const snap = await getDocs(contactsQuery);
-      if (!snap.empty) {
-        this.contacts = snap.docs.map((d) => sanitizeContactRecord({ id: d.id, ...d.data() }) as Contact);
-        this.updateGroupCounts();
+      const loadCollection = async <T>(collectionName: string): Promise<T[]> => {
+        try {
+          const q = query(collection(db, collectionName), where('organizationId', '==', this.orgId));
+          const snap = await getDocs(q);
+          if (snap.empty) return [];
+          return snap.docs.map((d) => ({ id: d.id, ...d.data() } as T));
+        } catch (err: any) {
+          if (err?.code === 'permission-denied') {
+            handleFirestoreError(err, OperationType.LIST, collectionName);
+          }
+          return [];
+        }
+      };
+
+      const [
+        firestoreClients,
+        firestoreConns,
+        firestoreContacts,
+        firestoreGroups,
+        firestoreTemplates,
+        firestoreCampaigns,
+        firestoreRecipients,
+        firestoreConversations,
+        firestoreMessages,
+        firestoreRules,
+        firestoreOptIn,
+        firestoreAuditLogs,
+      ] = await Promise.all([
+        loadCollection<Client>('clients'),
+        loadCollection<WhatsAppConnection>('whatsapp_connections'),
+        loadCollection<Contact>('contacts'),
+        loadCollection<ContactGroup>('contact_groups'),
+        loadCollection<MessageTemplate>('message_templates'),
+        loadCollection<Campaign>('campaigns'),
+        loadCollection<CampaignRecipient>('campaign_recipients'),
+        loadCollection<Conversation>('conversations'),
+        loadCollection<Message>('messages'),
+        loadCollection<AutomationRule>('automation_rules'),
+        loadCollection<OptInHistoryEvent>('opt_in_history'),
+        loadCollection<AuditLog>('audit_logs'),
+      ]);
+
+      let changed = false;
+
+      if (firestoreClients.length > 0) {
+        this.clients = firestoreClients;
+        changed = true;
+      }
+      if (firestoreConns.length > 0) {
+        this.whatsappConnections = firestoreConns;
+        changed = true;
+      }
+      if (firestoreContacts.length > 0) {
+        this.contacts = firestoreContacts.map((c) => sanitizeContactRecord(c) as Contact);
+        changed = true;
+      }
+      if (firestoreGroups.length > 0) {
+        this.groups = firestoreGroups;
+        changed = true;
+      }
+      if (firestoreTemplates.length > 0) {
+        this.templates = firestoreTemplates;
+        changed = true;
+      }
+      if (firestoreCampaigns.length > 0) {
+        this.campaigns = firestoreCampaigns;
+        changed = true;
+      }
+      if (firestoreRecipients.length > 0) {
+        this.campaignRecipients = firestoreRecipients;
+        changed = true;
+      }
+      if (firestoreConversations.length > 0) {
+        this.conversations = firestoreConversations;
+        changed = true;
+      }
+      if (firestoreMessages.length > 0) {
+        this.messages = firestoreMessages;
+        changed = true;
+      }
+      if (firestoreRules.length > 0) {
+        this.automationRules = firestoreRules;
+        changed = true;
+      }
+      if (firestoreOptIn.length > 0) {
+        this.optInHistory = firestoreOptIn;
+        changed = true;
+      }
+      if (firestoreAuditLogs.length > 0) {
+        this.auditLogs = firestoreAuditLogs;
+        changed = true;
+      }
+
+      // Ensure Default Client exists
+      const defaultClientId = `client_default_${this.orgId}`;
+      let defaultClient = this.clients.find((c) => c.code === 'DEFAULT' || c.id === defaultClientId);
+      if (!defaultClient) {
+        defaultClient = {
+          id: defaultClientId,
+          organizationId: this.orgId,
+          name: 'Default Client',
+          code: 'DEFAULT',
+          status: 'Active',
+          description: 'Primary business client workspace',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        this.clients.unshift(defaultClient);
+        this.persistDoc('clients', defaultClient.id, defaultClient);
+        changed = true;
+      }
+
+      // Run migration after Firestore hydration
+      this.migrateMissingClientIds(defaultClient.id);
+
+      // Validate or update activeClientId
+      if (!this.clients.some((c) => c.id === this.activeClientId && c.status === 'Active')) {
+        const firstActive = this.clients.find((c) => c.status === 'Active') || defaultClient;
+        this.activeClientId = firstActive.id;
+        try {
+          localStorage.setItem(`watsmanager_${this.orgId}_active_client`, this.activeClientId);
+        } catch {}
+      }
+
+      this.updateGroupCounts();
+
+      if (changed) {
         this.notify();
       }
     } catch (err: any) {
-      if (err?.code === 'permission-denied') {
-        handleFirestoreError(err, OperationType.LIST, 'contacts');
-      }
       // Firestore offline or connection unavailable - continue with local data
       console.warn('Firestore sync note: operating in offline mode or waiting for connection', err?.message);
     }
@@ -850,13 +1025,14 @@ class DataStore {
     const norm = normalizePhoneNumber(sanitized.phone || '');
     const cleanPhone = norm.isValid ? norm.normalized : (sanitized.phone || '');
 
+    const clientId = sanitized.clientId || this.requireActiveClientId();
     const id = `cnt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const newContact: Contact = {
       ...sanitized,
       id,
       phone: cleanPhone,
       organizationId: this.orgId,
-      clientId: sanitized.clientId || this.activeClientId,
+      clientId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -991,6 +1167,7 @@ class DataStore {
   }
 
   importContacts(rows: Partial<Contact>[], defaultGroup?: string): { added: number; updated: number; skipped: number } {
+    const activeClientId = this.requireActiveClientId();
     let added = 0;
     let updated = 0;
     let skipped = 0;
@@ -1007,10 +1184,10 @@ class DataStore {
         return;
       }
       const normalizedPhone = norm.normalized;
-      const existing = this.contacts.find((c) => arePhoneNumbersEqual(c.phone, normalizedPhone));
+      const existing = this.contacts.find((c) => c.clientId === activeClientId && arePhoneNumbersEqual(c.phone, normalizedPhone));
 
       if (existing) {
-        // Do not automatically overwrite existing contacts (classified as Duplicate)
+        // Do not automatically overwrite existing contacts (classified as Duplicate within same Client)
         skipped++;
       } else {
         const id = `cnt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -1020,7 +1197,7 @@ class DataStore {
         const newContact: Contact = {
           id,
           organizationId: this.orgId,
-          clientId: this.activeClientId,
+          clientId: activeClientId,
           firstName: sanitized.firstName || '',
           lastName: sanitized.lastName || '',
           phone: normalizedPhone,
@@ -1041,12 +1218,10 @@ class DataStore {
         this.contacts.unshift(newContact);
         this.persistDoc('contacts', id, newContact);
 
-        // Requirement: For CSV rows imported as Marketing Consented, create consent history with
-        // source = CSV Import and timestamp = import timestamp.
-        // Do not manufacture consent history for Not Consented contacts.
         if (isMarketing) {
           this.logConsentChange({
             contactId: id,
+            clientId: activeClientId,
             previousStatus: 'None',
             newStatus: 'Marketing Consented',
             source: 'CSV Import',
@@ -1068,11 +1243,12 @@ class DataStore {
 
   // ================= GROUPS =================
   addGroup(name: string, description: string = ''): ContactGroup {
+    const clientId = this.requireActiveClientId();
     const id = `grp_${Date.now()}`;
     const group: ContactGroup = {
       id,
       organizationId: this.orgId,
-      clientId: this.activeClientId,
+      clientId,
       name,
       description,
       memberCount: 0,
@@ -1090,11 +1266,14 @@ class DataStore {
     if (!g) return false;
     const oldName = g.name;
     g.name = newName;
-    // update contacts with old group name
+    // update contacts with old group name only for this group's client
     this.contacts.forEach((c) => {
-      const idx = c.groups.indexOf(oldName);
-      if (idx !== -1) {
-        c.groups[idx] = newName;
+      if (c.clientId === g.clientId) {
+        const idx = c.groups.indexOf(oldName);
+        if (idx !== -1) {
+          c.groups[idx] = newName;
+          this.persistDoc('contacts', c.id, c);
+        }
       }
     });
     this.notify();
@@ -1108,7 +1287,10 @@ class DataStore {
     const name = g.name;
     this.groups = this.groups.filter((x) => x.id !== id);
     this.contacts.forEach((c) => {
-      c.groups = c.groups.filter((grp) => grp !== name);
+      if (c.clientId === g.clientId && c.groups.includes(name)) {
+        c.groups = c.groups.filter((grp) => grp !== name);
+        this.persistDoc('contacts', c.id, c);
+      }
     });
     this.logAudit('Group Deleted', 'ContactGroup', id, { name });
     this.notify();
@@ -1118,18 +1300,19 @@ class DataStore {
 
   private updateGroupCounts() {
     this.groups.forEach((g) => {
-      g.memberCount = this.contacts.filter((c) => c.groups.includes(g.name)).length;
+      g.memberCount = this.contacts.filter((c) => c.clientId === g.clientId && c.groups.includes(g.name)).length;
     });
   }
 
   // ================= TEMPLATES =================
   addTemplate(tplData: Omit<MessageTemplate, 'id' | 'organizationId' | 'createdAt' | 'updatedAt'>): MessageTemplate {
+    const clientId = (tplData as any).clientId || this.requireActiveClientId();
     const id = `tpl_${Date.now()}`;
     const newTpl: MessageTemplate = {
       ...tplData,
       id,
       organizationId: this.orgId,
-      clientId: (tplData as any).clientId || this.activeClientId,
+      clientId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1159,24 +1342,31 @@ class DataStore {
     excludedRecipients?: Array<{ contactId: string; name: string; phone: string; reason: string }>;
     isDemo?: boolean;
   }): Promise<{ campaign: Campaign; summary: any }> {
+    const clientId = this.requireActiveClientId();
     const template = this.templates.find((t) => t.id === data.templateId);
     if (!template) {
       throw new Error('Selected template not found');
     }
 
+    if (template.clientId && template.clientId !== clientId) {
+      throw new Error("A campaign cannot use another Client's template.");
+    }
+
     const campaignType: 'Marketing' | 'Utility' =
       data.campaignType || (template.category === 'Utility' ? 'Utility' : 'Marketing');
 
-    // 1. Determine deduplicated audience contacts
+    const clientContacts = this.contacts.filter((c) => c.clientId === clientId);
+
+    // 1. Determine deduplicated audience contacts strictly within active Client
     let scopedContacts: Contact[] = [];
     if (data.targetContactIds && data.targetContactIds.length > 0) {
-      scopedContacts = this.contacts.filter((c) => data.targetContactIds!.includes(c.id));
+      scopedContacts = clientContacts.filter((c) => data.targetContactIds!.includes(c.id));
     } else if (data.audienceType === 'all') {
-      scopedContacts = [...this.contacts];
+      scopedContacts = [...clientContacts];
     } else if (data.audienceType === 'groups') {
-      scopedContacts = this.contacts.filter((c) => c.groups.some((g) => data.targetGroups.includes(g)));
+      scopedContacts = clientContacts.filter((c) => c.groups.some((g) => data.targetGroups.includes(g)));
     } else {
-      scopedContacts = this.contacts.filter((c) => data.targetContacts.includes(c.id));
+      scopedContacts = clientContacts.filter((c) => data.targetContacts.includes(c.id));
     }
 
     // Deduplicate by ID and normalized phone
@@ -1278,7 +1468,7 @@ class DataStore {
       const liveCampaign: Campaign = {
         id: campaignId,
         organizationId: this.orgId,
-        clientId: this.activeClientId,
+        clientId,
         name: data.name,
         campaignType,
         templateId: template.id,
@@ -1308,7 +1498,7 @@ class DataStore {
           id: `rcp_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
           campaignId,
           organizationId: this.orgId,
-          clientId: this.activeClientId,
+          clientId,
           contactId: rcp.contactId,
           phone: rcp.phone,
           normalizedPhone: rcp.normalizedPhone,
@@ -1328,13 +1518,13 @@ class DataStore {
 
         if (rcp.status === 'sent') {
           let conv = this.conversations.find(
-            (cnv) => cnv.contactPhone === rcp.phone || arePhoneNumbersEqual(cnv.contactPhone, rcp.phone)
+            (cnv) => cnv.clientId === clientId && (cnv.contactPhone === rcp.phone || arePhoneNumbersEqual(cnv.contactPhone, rcp.phone))
           );
           if (!conv) {
             conv = {
               id: `cnv_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
               organizationId: this.orgId,
-              clientId: this.activeClientId,
+              clientId,
               contactId: rcp.contactId,
               contactPhone: rcp.phone,
               contactName: rcp.contactName,
@@ -1356,7 +1546,7 @@ class DataStore {
             id: `msg_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
             conversationId: conv.id,
             organizationId: this.orgId,
-            clientId: this.activeClientId,
+            clientId,
             contactId: rcp.contactId,
             direction: 'outgoing',
             senderType: 'broadcast',
@@ -1392,7 +1582,7 @@ class DataStore {
     const campaign: Campaign = {
       id: campaignId,
       organizationId: this.orgId,
-      clientId: this.activeClientId,
+      clientId,
       name: data.name,
       campaignType,
       templateId: template.id,
@@ -1446,7 +1636,7 @@ class DataStore {
         id: `rcp_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
         campaignId,
         organizationId: this.orgId,
-        clientId: this.activeClientId,
+        clientId,
         contactId: c.id,
         phone: c.phone,
         normalizedPhone: normalizePhoneNumber(c.phone).normalized || c.phone,
@@ -1466,14 +1656,14 @@ class DataStore {
 
       // 2. Create or update Inbox conversation
       let conv = this.conversations.find(
-        (cnv) => cnv.contactPhone === c.phone || arePhoneNumbersEqual(cnv.contactPhone, c.phone)
+        (cnv) => cnv.clientId === clientId && (cnv.contactPhone === c.phone || arePhoneNumbersEqual(cnv.contactPhone, c.phone))
       );
 
       if (!conv) {
         conv = {
           id: `cnv_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
           organizationId: this.orgId,
-          clientId: this.activeClientId,
+          clientId,
           contactId: c.id,
           contactPhone: c.phone,
           contactName: `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.phone,
@@ -1497,7 +1687,7 @@ class DataStore {
         id: `msg_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
         conversationId: conv.id,
         organizationId: this.orgId,
-        clientId: this.activeClientId,
+        clientId,
         contactId: c.id,
         direction: 'outgoing',
         senderType: 'broadcast',
@@ -1563,6 +1753,8 @@ class DataStore {
       }
     }
 
+    const clientId = conv.clientId || this.requireActiveClientId();
+
     if (isLiveMode) {
       // LIVE MODE: Call Meta WhatsApp Cloud API via server endpoint. Do NOT create message locally until Meta returns success and real wamid
       const response = await fetch(this.getApiUrl('/api/whatsapp/send-message'), {
@@ -1587,7 +1779,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
-        clientId: conv.clientId || this.activeClientId,
+        clientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1628,7 +1820,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
-        clientId: conv.clientId || this.activeClientId,
+        clientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1713,6 +1905,8 @@ class DataStore {
           ]
         : undefined;
 
+    const clientId = conv.clientId || this.requireActiveClientId();
+
     if (isLiveMode) {
       // LIVE MODE: Call server WhatsApp service. Do not create fake local message beforehand.
       const response = await fetch(this.getApiUrl('/api/whatsapp/send-message'), {
@@ -1738,7 +1932,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
-        clientId: conv.clientId || this.activeClientId,
+        clientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1779,7 +1973,7 @@ class DataStore {
         id: msgId,
         conversationId,
         organizationId: this.orgId,
-        clientId: conv.clientId || this.activeClientId,
+        clientId,
         contactId: conv.contactId,
         recipient: cleanPhone,
         direction: 'outgoing',
@@ -1832,9 +2026,11 @@ class DataStore {
       // 1. Store returned wamid
       // 2. Create / update outgoing message record with initial status 'submitted'
       // Do not mark Delivered or Read until webhook status events are received.
-      let contact = this.contacts.find((c) => arePhoneNumbersEqual(c.phone, normRecipient));
+      const defaultClientId = this.getDefaultWhatsAppClientId();
+      let contact = this.contacts.find((c) => c.clientId === defaultClientId && arePhoneNumbersEqual(c.phone, normRecipient));
       if (!contact) {
         contact = this.addContact({
+          clientId: defaultClientId,
           firstName: 'WhatsApp',
           lastName: 'Contact',
           phone: `+${normRecipient}`,
@@ -1850,13 +2046,13 @@ class DataStore {
         });
       }
 
-      let conv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, normRecipient));
+      let conv = this.conversations.find((c) => c.clientId === defaultClientId && arePhoneNumbersEqual(c.contactPhone, normRecipient));
       const now = new Date().toISOString();
       if (!conv) {
         conv = {
           id: `cnv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           organizationId: this.orgId,
-          clientId: contact.clientId || this.activeClientId,
+          clientId: defaultClientId,
           contactId: contact.id,
           contactPhone: `+${normRecipient}`,
           contactName: `${contact.firstName} ${contact.lastName}`.trim() || `+${normRecipient}`,
@@ -1878,7 +2074,7 @@ class DataStore {
         id: `msg_hello_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         conversationId: conv.id,
         organizationId: this.orgId,
-        clientId: conv.clientId || contact.clientId || this.activeClientId,
+        clientId: defaultClientId,
         contactId: contact.id,
         direction: 'outgoing',
         senderType: 'agent',
@@ -1927,8 +2123,9 @@ class DataStore {
 
   // Incoming message simulator handler
   async processSimulatedIncoming(senderPhone: string, text: string, org: Organization): Promise<any> {
+    const activeClientId = this.requireActiveClientId();
     const cleanPhone = senderPhone.replace(/\s+/g, '');
-    let contact = this.contacts.find((c) => c.phone.replace(/\s+/g, '') === cleanPhone);
+    let contact = this.contacts.find((c) => c.clientId === activeClientId && arePhoneNumbersEqual(c.phone, cleanPhone));
 
     const isFirstMessage = !contact;
 
@@ -1949,16 +2146,17 @@ class DataStore {
         optInSource: 'Inbound WhatsApp Message',
         optOut: false,
         status: 'Active',
+        clientId: activeClientId,
       });
     }
 
     // 2. Find or create conversation
-    let conv = this.conversations.find((c) => c.contactPhone.replace(/\s+/g, '') === cleanPhone);
+    let conv = this.conversations.find((c) => c.clientId === activeClientId && arePhoneNumbersEqual(c.contactPhone, cleanPhone));
     if (!conv) {
       conv = {
         id: `cnv_${Date.now()}`,
         organizationId: this.orgId,
-        clientId: contact.clientId || this.activeClientId,
+        clientId: activeClientId,
         contactId: contact.id,
         contactPhone: contact.phone,
         contactName: `${contact.firstName} ${contact.lastName}`.trim() || contact.phone,
@@ -1983,7 +2181,7 @@ class DataStore {
       id: `msg_in_${Date.now()}`,
       conversationId: conv.id,
       organizationId: this.orgId,
-      clientId: conv.clientId || contact.clientId || this.activeClientId,
+      clientId: activeClientId,
       contactId: contact.id,
       direction: 'incoming',
       senderType: 'customer',
@@ -1995,7 +2193,7 @@ class DataStore {
     };
     this.messages.push(incomingMsg);
 
-    // 4. Call server simulator endpoint to evaluate opt-out & automations
+    // 4. Call server simulator endpoint to evaluate opt-out & automations (scoped to active client's rules)
     try {
       const response = await fetch('/api/webhook/simulate', {
         method: 'POST',
@@ -2003,7 +2201,7 @@ class DataStore {
         body: JSON.stringify({
           fromPhone: cleanPhone,
           text,
-          rules: this.automationRules,
+          rules: this.automationRules.filter((r) => r.clientId === activeClientId),
           isFirstMessage,
           businessHours: org.businessHours,
         }),
@@ -2035,7 +2233,7 @@ class DataStore {
           id: `msg_auto_${Date.now()}`,
           conversationId: conv.id,
           organizationId: this.orgId,
-          clientId: conv.clientId || contact.clientId || this.activeClientId,
+          clientId: activeClientId,
           contactId: contact.id,
           direction: 'outgoing',
           senderType: 'automation',
@@ -2074,12 +2272,13 @@ class DataStore {
 
   // ================= AUTOMATIONS =================
   addAutomationRule(ruleData: Omit<AutomationRule, 'id' | 'organizationId' | 'createdAt'>): AutomationRule {
+    const clientId = (ruleData as any).clientId || this.requireActiveClientId();
     const id = `rul_${Date.now()}`;
     const newRule: AutomationRule = {
       ...ruleData,
       id,
       organizationId: this.orgId,
-      clientId: (ruleData as any).clientId || this.activeClientId,
+      clientId,
       triggerCount: 0,
       createdAt: new Date().toISOString(),
     };
@@ -2110,10 +2309,14 @@ class DataStore {
 
   // ================= AUDIT & CONSENT =================
   logAudit(action: string, entityType: string, entityId: string, metadata?: Record<string, any>) {
+    let clientId = this.activeClientId;
+    if (!clientId || !this.clients.some((c) => c.id === clientId)) {
+      clientId = this.getDefaultWhatsAppClientId();
+    }
     const log: AuditLog = {
       id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       organizationId: this.orgId,
-      clientId: this.activeClientId,
+      clientId,
       userId: 'current_user',
       action,
       entityType,
@@ -2137,10 +2340,15 @@ class DataStore {
     notes?: string;
     phone?: string;
   }) {
+    let clientId = params.clientId;
+    if (!clientId) {
+      const contact = this.contacts.find((c) => c.id === params.contactId);
+      clientId = contact?.clientId || (this.activeClientId && this.clients.some((c) => c.id === this.activeClientId) ? this.activeClientId : this.getDefaultWhatsAppClientId());
+    }
     const hist: OptInHistoryEvent = {
       id: `opt_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       organizationId: params.organizationId || this.orgId,
-      clientId: params.clientId || this.activeClientId,
+      clientId,
       contactId: params.contactId,
       phone: params.phone || '',
       previousStatus: params.previousStatus,
