@@ -356,6 +356,34 @@ class DataStore {
     patchRecords(this.automationRules, 'automation_rules');
     patchRecords(this.auditLogs, 'audit_logs');
     patchRecords(this.optInHistory, 'opt_in_history');
+
+    // Purge any stale hard-coded placeholder strings from existing connections
+    this.whatsappConnections.forEach((conn) => {
+      let changed = false;
+      if (conn.displayPhoneNumber === '+234 806 862 0081' || conn.displayPhoneNumber === '+2348068620081') {
+        conn.displayPhoneNumber = undefined;
+        changed = true;
+      }
+      if (conn.verifiedDisplayName === 'Official Cloud API') {
+        conn.verifiedDisplayName = undefined;
+        changed = true;
+      }
+      if (conn.wabaIdMasked === '••••••••3563') {
+        conn.wabaIdMasked = undefined;
+        changed = true;
+      }
+      if (conn.phoneNumberIdMasked === '••••••••3367') {
+        conn.phoneNumberIdMasked = undefined;
+        changed = true;
+      }
+      if (conn.apiVersion === 'v25.0') {
+        conn.apiVersion = undefined;
+        changed = true;
+      }
+      if (changed) {
+        this.persistDoc('whatsapp_connections', conn.id, conn);
+      }
+    });
   }
 
   async initialize(organizationId: string) {
@@ -392,7 +420,7 @@ class DataStore {
     // Safe, idempotent migration: assign Default Client ID to every existing record without a clientId
     this.migrateMissingClientIds(effectiveDefaultClientId);
 
-    // Default WhatsApp connection metadata (metadata only, no secrets stored)
+    // Default WhatsApp connection metadata (non-sensitive only, no hardcoded recipient or phone numbers)
     if (this.whatsappConnections.length === 0) {
       const isConnected = this.serverWhatsAppStatus === 'Connected';
       const defaultConn: WhatsAppConnection = {
@@ -400,11 +428,6 @@ class DataStore {
         organizationId,
         clientId: effectiveDefaultClientId,
         label: 'Production WhatsApp Cloud API',
-        displayPhoneNumber: '+234 806 862 0081',
-        verifiedDisplayName: 'Official Cloud API',
-        wabaIdMasked: '••••••••3563',
-        phoneNumberIdMasked: '••••••••3367',
-        apiVersion: 'v25.0',
         connectionStatus: isConnected ? 'Connected' : 'Not Configured',
         isDefault: true,
         createdAt: new Date().toISOString(),
@@ -429,8 +452,8 @@ class DataStore {
       } catch {}
     }
 
-    // Ensure official Meta hello_world template is available and marked isLiveMeta
-    const hwIdx = this.templates.findIndex((t) => t.name === 'hello_world');
+    // Ensure official Meta hello_world template is available and scoped to Default Client
+    const hwIdx = this.templates.findIndex((t) => t.clientId === effectiveDefaultClientId && t.name === 'hello_world');
     if (hwIdx >= 0) {
       this.templates[hwIdx].isLiveMeta = true;
       this.templates[hwIdx].isDemo = false;
@@ -458,8 +481,8 @@ class DataStore {
       });
     }
 
-    // Ensure verified test recipient +2348068620081 is present for testing
-    let testContact = this.contacts.find((c) => arePhoneNumbersEqual(c.phone, '+2348068620081'));
+    // Ensure verified test recipient +2348068620081 is present only under Default Client (Requirement 7)
+    let testContact = this.contacts.find((c) => c.clientId === effectiveDefaultClientId && arePhoneNumbersEqual(c.phone, '+2348068620081'));
     if (!testContact) {
       testContact = {
         id: `cnt_verified_test_${organizationId}`,
@@ -488,7 +511,8 @@ class DataStore {
       testContact.clientId = effectiveDefaultClientId;
     }
 
-    let testConv = this.conversations.find((c) => arePhoneNumbersEqual(c.contactPhone, '+2348068620081'));
+    // Ensure test conversation is scoped to Default Client (Requirement 7)
+    let testConv = this.conversations.find((c) => c.clientId === effectiveDefaultClientId && arePhoneNumbersEqual(c.contactPhone, '+2348068620081'));
     if (!testConv) {
       const past25Hours = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
       testConv = {
@@ -537,6 +561,21 @@ class DataStore {
         try {
           localStorage.setItem('whatsflow_server_whatsapp_status', this.serverWhatsAppStatus);
         } catch {}
+
+        // For the current Default WhatsApp Client only, synchronize connection metadata from authoritative server status
+        const defaultClientId = this.getDefaultWhatsAppClientId();
+        const defaultConn = this.whatsappConnections.find((c) => c.clientId === defaultClientId && c.isDefault);
+        if (defaultConn) {
+          defaultConn.connectionStatus = isConnected ? 'Connected' : 'Not Configured';
+          if (data.apiVersion) defaultConn.apiVersion = data.apiVersion;
+          if (data.phoneNumberId) defaultConn.phoneNumberIdMasked = data.phoneNumberId;
+          if (data.wabaId) defaultConn.wabaIdMasked = data.wabaId;
+          if (data.displayPhoneNumber) defaultConn.displayPhoneNumber = data.displayPhoneNumber;
+          if (data.verifiedDisplayName) defaultConn.verifiedDisplayName = data.verifiedDisplayName;
+          defaultConn.updatedAt = new Date().toISOString();
+          this.persistDoc('whatsapp_connections', defaultConn.id, defaultConn);
+        }
+
         this.notify();
         return this.serverWhatsAppStatus;
       }
@@ -705,6 +744,7 @@ class DataStore {
             };
             this.conversations.unshift(conv);
             this.persistDoc('conversations', conv.id, conv);
+            this.logAudit('Inbound Conversation Created', 'Conversation', conv.id, { contactPhone: fromPhone }, inboundClientId);
           } else {
             conv.lastMessage = text;
             conv.lastMessageAt = timestamp;
@@ -737,23 +777,17 @@ class DataStore {
           };
           this.messages.push(inMsg);
           this.persistDoc('messages', inMsg.id, inMsg);
+          this.logAudit('Inbound Message Received', 'Message', inMsg.id, { from: fromPhone, wamid }, inboundClientId);
           changed = true;
 
           if (consentEvaluation?.isOptOutCommand) {
+            // Note: updateContact already invokes logConsentChange and logAudit with contact's clientId.
+            // Do not call logConsentChange here to prevent duplicate consent records for one STOP event.
             this.updateContact(contact.id, {
               optOut: true,
               status: 'Opted Out',
               optOutDate: timestamp,
               optOutSource: 'WhatsApp Inbound STOP Command',
-            });
-            this.logConsentChange({
-              contactId: contact.id,
-              clientId: inboundClientId,
-              phone: contact.phone,
-              previousStatus: 'Active',
-              newStatus: 'Opted Out',
-              source: 'WhatsApp Inbound STOP Command',
-              notes: text,
             });
           }
 
@@ -775,6 +809,7 @@ class DataStore {
             };
             this.messages.push(outMsg);
             this.persistDoc('messages', outMsg.id, outMsg);
+            this.logAudit('Inbound Auto-Reply Sent', 'Message', outMsg.id, { to: fromPhone }, inboundClientId);
             conv.lastMessage = autoReplySent;
             conv.lastMessageAt = outMsg.timestamp;
             conv.lastOutgoingMessageAt = outMsg.timestamp;
@@ -821,8 +856,11 @@ class DataStore {
       const defaultWhatsAppClientId = this.getDefaultWhatsAppClientId();
 
       for (const tpl of metaTemplates) {
+        // Scoped matching logic: only match existing templates belonging to defaultWhatsAppClientId
         const existingIdx = this.templates.findIndex(
-          (t) => t.whatsappTemplateId === tpl.whatsappTemplateId || t.name === tpl.name
+          (t) =>
+            t.clientId === defaultWhatsAppClientId &&
+            (t.whatsappTemplateId === tpl.whatsappTemplateId || t.name === tpl.name)
         );
         const metaTpl: MessageTemplate = {
           ...tpl,
@@ -854,33 +892,38 @@ class DataStore {
     }
 
     try {
-      const loadCollection = async <T>(collectionName: string): Promise<T[]> => {
+      interface CollectionResult<T> {
+        success: boolean;
+        data: T[];
+      }
+
+      const loadCollection = async <T>(collectionName: string): Promise<CollectionResult<T>> => {
         try {
           const q = query(collection(db, collectionName), where('organizationId', '==', this.orgId));
           const snap = await getDocs(q);
-          if (snap.empty) return [];
-          return snap.docs.map((d) => ({ id: d.id, ...d.data() } as T));
+          const data = snap.docs.map((d) => ({ id: d.id, ...d.data() } as T));
+          return { success: true, data };
         } catch (err: any) {
           if (err?.code === 'permission-denied') {
             handleFirestoreError(err, OperationType.LIST, collectionName);
           }
-          return [];
+          return { success: false, data: [] };
         }
       };
 
       const [
-        firestoreClients,
-        firestoreConns,
-        firestoreContacts,
-        firestoreGroups,
-        firestoreTemplates,
-        firestoreCampaigns,
-        firestoreRecipients,
-        firestoreConversations,
-        firestoreMessages,
-        firestoreRules,
-        firestoreOptIn,
-        firestoreAuditLogs,
+        clientsRes,
+        connsRes,
+        contactsRes,
+        groupsRes,
+        templatesRes,
+        campaignsRes,
+        recipientsRes,
+        conversationsRes,
+        messagesRes,
+        rulesRes,
+        optInRes,
+        auditLogsRes,
       ] = await Promise.all([
         loadCollection<Client>('clients'),
         loadCollection<WhatsAppConnection>('whatsapp_connections'),
@@ -898,56 +941,57 @@ class DataStore {
 
       let changed = false;
 
-      if (firestoreClients.length > 0) {
-        this.clients = firestoreClients;
+      // Successful queries replace local cache (even when empty). Failed queries retain cached data.
+      if (clientsRes.success) {
+        this.clients = clientsRes.data;
         changed = true;
       }
-      if (firestoreConns.length > 0) {
-        this.whatsappConnections = firestoreConns;
+      if (connsRes.success) {
+        this.whatsappConnections = connsRes.data;
         changed = true;
       }
-      if (firestoreContacts.length > 0) {
-        this.contacts = firestoreContacts.map((c) => sanitizeContactRecord(c) as Contact);
+      if (contactsRes.success) {
+        this.contacts = contactsRes.data.map((c) => sanitizeContactRecord(c) as Contact);
         changed = true;
       }
-      if (firestoreGroups.length > 0) {
-        this.groups = firestoreGroups;
+      if (groupsRes.success) {
+        this.groups = groupsRes.data;
         changed = true;
       }
-      if (firestoreTemplates.length > 0) {
-        this.templates = firestoreTemplates;
+      if (templatesRes.success) {
+        this.templates = templatesRes.data;
         changed = true;
       }
-      if (firestoreCampaigns.length > 0) {
-        this.campaigns = firestoreCampaigns;
+      if (campaignsRes.success) {
+        this.campaigns = campaignsRes.data;
         changed = true;
       }
-      if (firestoreRecipients.length > 0) {
-        this.campaignRecipients = firestoreRecipients;
+      if (recipientsRes.success) {
+        this.campaignRecipients = recipientsRes.data;
         changed = true;
       }
-      if (firestoreConversations.length > 0) {
-        this.conversations = firestoreConversations;
+      if (conversationsRes.success) {
+        this.conversations = conversationsRes.data;
         changed = true;
       }
-      if (firestoreMessages.length > 0) {
-        this.messages = firestoreMessages;
+      if (messagesRes.success) {
+        this.messages = messagesRes.data;
         changed = true;
       }
-      if (firestoreRules.length > 0) {
-        this.automationRules = firestoreRules;
+      if (rulesRes.success) {
+        this.automationRules = rulesRes.data;
         changed = true;
       }
-      if (firestoreOptIn.length > 0) {
-        this.optInHistory = firestoreOptIn;
+      if (optInRes.success) {
+        this.optInHistory = optInRes.data;
         changed = true;
       }
-      if (firestoreAuditLogs.length > 0) {
-        this.auditLogs = firestoreAuditLogs;
+      if (auditLogsRes.success) {
+        this.auditLogs = auditLogsRes.data;
         changed = true;
       }
 
-      // Ensure Default Client exists
+      // Ensure Default Client exists (preserve bootstrap default client)
       const defaultClientId = `client_default_${this.orgId}`;
       let defaultClient = this.clients.find((c) => c.code === 'DEFAULT' || c.id === defaultClientId);
       if (!defaultClient) {
@@ -966,8 +1010,28 @@ class DataStore {
         changed = true;
       }
 
+      const effectiveDefaultClientId = defaultClient.id;
+
+      // Ensure Default WhatsApp connection exists for Default Client
+      if (this.whatsappConnections.length === 0) {
+        const isConnected = this.serverWhatsAppStatus === 'Connected';
+        const defaultConn: WhatsAppConnection = {
+          id: `conn_default_${this.orgId}`,
+          organizationId: this.orgId,
+          clientId: effectiveDefaultClientId,
+          label: 'Production WhatsApp Cloud API',
+          connectionStatus: isConnected ? 'Connected' : 'Not Configured',
+          isDefault: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        this.whatsappConnections.push(defaultConn);
+        this.persistDoc('whatsapp_connections', defaultConn.id, defaultConn);
+        changed = true;
+      }
+
       // Run migration after Firestore hydration
-      this.migrateMissingClientIds(defaultClient.id);
+      this.migrateMissingClientIds(effectiveDefaultClientId);
 
       // Validate or update activeClientId
       if (!this.clients.some((c) => c.id === this.activeClientId && c.status === 'Active')) {
@@ -1041,11 +1105,12 @@ class DataStore {
     this.updateGroupCounts();
 
     // Audit log
-    this.logAudit('Contact Created', 'Contact', id, { phone: newContact.phone });
+    this.logAudit('Contact Created', 'Contact', id, { phone: newContact.phone }, newContact.clientId);
 
     const initialStatus = getContactConsentStatus(newContact);
     this.logConsentChange({
       contactId: id,
+      clientId: newContact.clientId,
       previousStatus: 'None',
       newStatus: initialStatus,
       source: newContact.optInSource || newContact.optOutSource || (initialStatus === 'Marketing Consented' ? 'Direct Consent' : 'Contact Created'),
@@ -1110,6 +1175,7 @@ class DataStore {
 
       this.logConsentChange({
         contactId: id,
+        clientId: updated.clientId,
         previousStatus: prevStatus,
         newStatus: nextStatus,
         source,
@@ -1120,8 +1186,10 @@ class DataStore {
       });
 
       if (nextStatus === 'Opted Out') {
-        this.logAudit('Contact Opted Out', 'Contact', id);
+        this.logAudit('Contact Opted Out', 'Contact', id, undefined, updated.clientId);
       }
+    } else {
+      this.logAudit('Contact Updated', 'Contact', id, { fields: Object.keys(sanitizedUpdates) }, updated.clientId);
     }
 
     this.contacts[idx] = updated;
@@ -1136,7 +1204,7 @@ class DataStore {
     if (!c) return false;
     this.contacts = this.contacts.filter((x) => x.id !== id);
     this.updateGroupCounts();
-    this.logAudit('Contact Deleted', 'Contact', id, { phone: c.phone });
+    this.logAudit('Contact Deleted', 'Contact', id, { phone: c.phone }, c.clientId);
     this.notify();
     this.deleteFirestoreDoc('contacts', id);
     return true;
@@ -1236,7 +1304,7 @@ class DataStore {
     });
 
     this.updateGroupCounts();
-    this.logAudit('Contact Imported', 'Contact', 'bulk', { added, skipped });
+    this.logAudit('Contact Imported', 'Contact', 'bulk', { added, skipped }, activeClientId);
     this.notify();
     return { added, updated, skipped };
   }
@@ -1255,7 +1323,7 @@ class DataStore {
       createdAt: new Date().toISOString(),
     };
     this.groups.push(group);
-    this.logAudit('Group Created', 'ContactGroup', id, { name });
+    this.logAudit('Group Created', 'ContactGroup', id, { name }, group.clientId);
     this.notify();
     this.persistDoc('contact_groups', id, group);
     return group;
@@ -1276,6 +1344,7 @@ class DataStore {
         }
       }
     });
+    this.logAudit('Group Renamed', 'ContactGroup', id, { oldName, newName }, g.clientId);
     this.notify();
     this.persistDoc('contact_groups', id, g);
     return true;
@@ -1292,7 +1361,7 @@ class DataStore {
         this.persistDoc('contacts', c.id, c);
       }
     });
-    this.logAudit('Group Deleted', 'ContactGroup', id, { name });
+    this.logAudit('Group Deleted', 'ContactGroup', id, { name }, g.clientId);
     this.notify();
     this.deleteFirestoreDoc('contact_groups', id);
     return true;
@@ -1317,7 +1386,7 @@ class DataStore {
       updatedAt: new Date().toISOString(),
     };
     this.templates.unshift(newTpl);
-    this.logAudit('Template Created', 'MessageTemplate', id, { name: newTpl.name });
+    this.logAudit('Template Created', 'MessageTemplate', id, { name: newTpl.name }, newTpl.clientId);
     this.notify();
     this.persistDoc('message_templates', id, newTpl);
     return newTpl;
@@ -1572,7 +1641,7 @@ class DataStore {
         failed: summary.failed,
         skipped: summary.skipped,
         mode: 'Live WhatsApp Cloud API',
-      });
+      }, clientId);
 
       this.notify();
       this.persistDoc('campaigns', campaignId, liveCampaign);
@@ -1709,7 +1778,7 @@ class DataStore {
       eligible: eligible.length,
       excluded: excluded.length,
       mode: isDemoMode ? 'Demo Simulation' : 'Live WhatsApp API',
-    });
+    }, clientId);
 
     this.notify();
     this.persistDoc('campaigns', campaignId, campaign);
@@ -1801,6 +1870,7 @@ class DataStore {
       this.notify();
       this.persistDoc('messages', msgId, msg);
       this.persistDoc('conversations', conv.id, conv);
+      this.logAudit('Manual Message Sent', 'Message', msgId, { recipient: cleanPhone, live: true }, clientId);
 
       // Trigger immediate event poll to pick up rapid 'sent' or 'delivered' status webhooks
       this.pollEvents().catch(() => {});
@@ -1842,6 +1912,7 @@ class DataStore {
       this.notify();
       this.persistDoc('messages', msgId, msg);
       this.persistDoc('conversations', conv.id, conv);
+      this.logAudit('Manual Message Sent', 'Message', msgId, { recipient: cleanPhone, live: false }, clientId);
       return msg;
     }
   }
@@ -1955,6 +2026,7 @@ class DataStore {
       this.notify();
       this.persistDoc('messages', msgId, msg);
       this.persistDoc('conversations', conv.id, conv);
+      this.logAudit('Manual Template Message Sent', 'Message', msgId, { template: template.name, recipient: cleanPhone, live: true }, clientId);
 
       this.pollEvents().catch(() => {});
 
@@ -1996,6 +2068,7 @@ class DataStore {
       this.notify();
       this.persistDoc('messages', msgId, msg);
       this.persistDoc('conversations', conv.id, conv);
+      this.logAudit('Manual Template Message Sent', 'Message', msgId, { template: template.name, recipient: cleanPhone, live: false }, clientId);
       return msg;
     }
   }
@@ -2093,7 +2166,7 @@ class DataStore {
         recipient: normRecipient,
         wamid: data.wamid,
         status: 'submitted',
-      });
+      }, defaultClientId);
 
       this.notify();
       this.persistDoc('messages', msg.id, msg);
@@ -2107,6 +2180,7 @@ class DataStore {
     const conv = this.conversations.find((c) => c.id === conversationId);
     if (!conv) return 'Open';
     conv.status = conv.status === 'Open' ? 'Closed' : 'Open';
+    this.logAudit('Conversation Status Changed', 'Conversation', conv.id, { status: conv.status }, conv.clientId);
     this.notify();
     this.persistDoc('conversations', conv.id, conv);
     return conv.status;
@@ -2215,16 +2289,16 @@ class DataStore {
           optOut: true,
           marketingOptIn: false,
           optOutDate: new Date().toISOString(),
+          optOutSource: 'Simulation STOP Command',
           status: 'Opted Out',
         });
-        this.logConsent(contact.id, cleanPhone, 'keyword_opt_out', `Customer sent ${text}`);
       } else if (simResult.consent?.isOptInCommand) {
         this.updateContact(contact.id, {
           optOut: false,
           marketingOptIn: true,
+          optInSource: 'Simulation START Command',
           status: 'Active',
         });
-        this.logConsent(contact.id, cleanPhone, 'keyword_opt_in', `Customer sent ${text}`);
       }
 
       // If auto-reply triggered
@@ -2283,7 +2357,7 @@ class DataStore {
       createdAt: new Date().toISOString(),
     };
     this.automationRules.push(newRule);
-    this.logAudit('Automation Created', 'AutomationRule', id, { name: newRule.name });
+    this.logAudit('Automation Created', 'AutomationRule', id, { name: newRule.name }, newRule.clientId);
     this.notify();
     this.persistDoc('automation_rules', id, newRule);
     return newRule;
@@ -2293,30 +2367,41 @@ class DataStore {
     const r = this.automationRules.find((x) => x.id === id);
     if (!r) return null;
     Object.assign(r, updates);
-    this.logAudit('Automation Changed', 'AutomationRule', id, updates);
+    this.logAudit('Automation Changed', 'AutomationRule', id, updates, r.clientId);
     this.notify();
     this.persistDoc('automation_rules', id, r);
     return r;
   }
 
   deleteAutomationRule(id: string): boolean {
+    const r = this.automationRules.find((x) => x.id === id);
+    if (!r) return false;
     this.automationRules = this.automationRules.filter((x) => x.id !== id);
-    this.logAudit('Automation Deleted', 'AutomationRule', id);
+    this.logAudit('Automation Deleted', 'AutomationRule', id, undefined, r.clientId);
     this.notify();
     this.deleteFirestoreDoc('automation_rules', id);
     return true;
   }
 
   // ================= AUDIT & CONSENT =================
-  logAudit(action: string, entityType: string, entityId: string, metadata?: Record<string, any>) {
-    let clientId = this.activeClientId;
-    if (!clientId || !this.clients.some((c) => c.id === clientId)) {
-      clientId = this.getDefaultWhatsAppClientId();
+  logAudit(
+    action: string,
+    entityType: string,
+    entityId: string,
+    metadata?: Record<string, any>,
+    clientId?: string
+  ) {
+    let effectiveClientId = clientId;
+    if (!effectiveClientId) {
+      effectiveClientId = this.activeClientId;
+    }
+    if (!effectiveClientId || !this.clients.some((c) => c.id === effectiveClientId)) {
+      effectiveClientId = this.getDefaultWhatsAppClientId();
     }
     const log: AuditLog = {
       id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       organizationId: this.orgId,
-      clientId,
+      clientId: effectiveClientId,
       userId: 'current_user',
       action,
       entityType,
@@ -2343,7 +2428,12 @@ class DataStore {
     let clientId = params.clientId;
     if (!clientId) {
       const contact = this.contacts.find((c) => c.id === params.contactId);
-      clientId = contact?.clientId || (this.activeClientId && this.clients.some((c) => c.id === this.activeClientId) ? this.activeClientId : this.getDefaultWhatsAppClientId());
+      clientId = contact?.clientId;
+    }
+    if (!clientId || !this.clients.some((c) => c.id === clientId)) {
+      clientId = (this.activeClientId && this.clients.some((c) => c.id === this.activeClientId))
+        ? this.activeClientId
+        : this.getDefaultWhatsAppClientId();
     }
     const hist: OptInHistoryEvent = {
       id: `opt_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,

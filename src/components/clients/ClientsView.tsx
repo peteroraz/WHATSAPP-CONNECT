@@ -174,9 +174,9 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                   const clientCampaignsCount = campaigns.filter((c) => c.clientId === client.id).length;
                   const clientConversationsCount = conversations.filter((c) => c.clientId === client.id).length;
                   
-                  // Connection metadata
+                  // Connection metadata: A Client is Connected only when its own WhatsAppConnection has connectionStatus === 'Connected'
                   const conn = whatsappConnections.find((w) => w.clientId === client.id);
-                  const isConnected = conn?.connectionStatus === 'Connected' || isWhatsAppConnected;
+                  const isConnected = conn?.connectionStatus === 'Connected';
 
                   return (
                     <tr
@@ -245,15 +245,15 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                         <div className="flex items-center gap-1.5">
                           <span
                             className={`w-2 h-2 rounded-full ${
-                              isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'
+                              isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'
                             }`}
                           />
-                          <span className="text-xs text-slate-700">
+                          <span className={`text-xs ${isConnected ? 'text-emerald-700 font-semibold' : 'text-slate-600'}`}>
                             {isConnected ? 'Connected' : 'Not Configured'}
                           </span>
                         </div>
                         <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                          {conn?.displayPhoneNumber || 'Meta Cloud API V1'}
+                          {conn?.displayPhoneNumber || (conn ? 'Production WhatsApp Cloud API' : '—')}
                         </span>
                       </td>
 

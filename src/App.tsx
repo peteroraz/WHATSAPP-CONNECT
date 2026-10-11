@@ -68,6 +68,21 @@ function MainApp({ onNavigate }: MainAppProps) {
     }
   }, [selectedConversationId, currentTab]);
 
+  // Ensure selected conversation always belongs to the currently active client
+  // Declared at top-level before conditional returns to adhere to React Rules of Hooks
+  useEffect(() => {
+    if (selectedConversationId) {
+      const activeClientId = dataStore.activeClientId;
+      const belongsToActive = dataStore.conversations.some(
+        (c) => c.clientId === activeClientId && c.id === selectedConversationId
+      );
+      if (!belongsToActive) {
+        setSelectedConversationId(null);
+        dataStore.setActiveConversationId(null);
+      }
+    }
+  }, [selectedConversationId, dataStore.activeClientId, dataStore.conversations]);
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -109,6 +124,12 @@ function MainApp({ onNavigate }: MainAppProps) {
     0
   );
 
+  const handleClientChange = (clientId: string) => {
+    setSelectedConversationId(null);
+    dataStore.setActiveConversationId(null);
+    dataStore.setActiveClient(clientId);
+  };
+
   const handleLogout = async () => {
     await authService.signOut();
     setCurrentUser(null);
@@ -135,7 +156,7 @@ function MainApp({ onNavigate }: MainAppProps) {
       unreadMessagesCount={unreadCount}
       clients={dataStore.clients}
       activeClientId={dataStore.activeClientId}
-      onSelectClient={(clientId) => dataStore.setActiveClient(clientId)}
+      onSelectClient={handleClientChange}
       onLogout={handleLogout}
       onOpenSimulator={() => setIsSimulatorOpen(true)}
       onResetDemoData={handleResetDemoData}
@@ -165,7 +186,7 @@ function MainApp({ onNavigate }: MainAppProps) {
           conversations={dataStore.conversations}
           whatsappConnections={dataStore.whatsappConnections}
           isWhatsAppConnected={isWhatsAppConnected}
-          onSelectActiveClient={(id) => dataStore.setActiveClient(id)}
+          onSelectActiveClient={handleClientChange}
           onAddClient={(data) => dataStore.addClient(data)}
           onUpdateClient={(id, updates) => dataStore.updateClient(id, updates)}
           onToggleClientStatus={(id) => dataStore.toggleClientStatus(id)}
