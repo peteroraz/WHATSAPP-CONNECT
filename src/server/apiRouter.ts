@@ -6,6 +6,7 @@ import { evaluateMessageConsentCommands } from './optOutHandler.ts';
 import { evaluateAutomationRules } from './automationRunner.ts';
 import type { AutomationRule } from '../types/index.ts';
 import { normalizePhoneNumber } from '../utils/phoneUtils.ts';
+import { isProduction } from './firebaseAdmin.ts';
 
 export const apiRouter: Router = express.Router();
 
@@ -222,6 +223,12 @@ const handleGetEvents = async (req: Request, res: Response) => {
     return res.json({ success: true, events });
   } catch (err: any) {
     console.error('[API Router] Error fetching durable webhook events:', err?.message || err);
+    if (isProduction) {
+      return res.status(503).json({
+        success: false,
+        error: 'Durable messaging store temporarily unavailable.',
+      });
+    }
     const fallbackEvents = whatsappService.getEventsSince(req.query.since as string);
     return res.json({ success: true, events: fallbackEvents });
   }

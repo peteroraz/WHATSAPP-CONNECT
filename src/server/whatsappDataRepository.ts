@@ -1,4 +1,4 @@
-import { adminDb, isProduction } from './firebaseAdmin.ts';
+import { adminDb, isProduction, isFirestoreAdminAvailable } from './firebaseAdmin.ts';
 
 export interface WhatsAppPhoneRoute {
   phoneNumberId: string;
@@ -68,11 +68,16 @@ export class WhatsAppDataRepository {
   private optOuts = new Map<string, boolean>();
   private automationRules = new Map<string, any[]>();
 
-  private adminDbAvailable = true;
+  private _adminDbFailed = false;
   private hasLoggedDevNotice = false;
 
+  private get adminDbAvailable(): boolean {
+    if (this._adminDbFailed) return false;
+    return isFirestoreAdminAvailable;
+  }
+
   private handleDevAdminNotice(err?: any) {
-    this.adminDbAvailable = false;
+    this._adminDbFailed = true;
     if (!this.hasLoggedDevNotice) {
       this.hasLoggedDevNotice = true;
       console.info(

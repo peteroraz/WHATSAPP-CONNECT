@@ -734,12 +734,11 @@ export class WhatsAppService {
 
     if (!wamid || !status) return;
 
-    // Idempotency check: unique key (wamid + status)
     const idempotencyKey = `${wamid}_${status}`;
+    // Fast in-memory deduplication check (only populated after durable success)
     if (this.processedStatusKeys.has(idempotencyKey)) {
       return;
     }
-    this.processedStatusKeys.add(idempotencyKey);
 
     const eventTimestamp = statusUpdate.timestamp
       ? new Date(Number(statusUpdate.timestamp) * 1000).toISOString()
@@ -755,6 +754,9 @@ export class WhatsAppService {
       try {
         routeInfo = await whatsappDataRepository.resolvePhoneRoute(meta.phoneNumberId);
       } catch (err) {
+        if (isProduction) {
+          throw err;
+        }
         console.warn('[WhatsAppService] Could not resolve phone route for status update:', meta.phoneNumberId);
       }
     }
@@ -798,6 +800,9 @@ export class WhatsAppService {
       }
       console.warn('[WhatsAppService] Notice updating durable message/recipient status:', err?.message || err);
     }
+
+    // Authoritative idempotency: add to in-memory set ONLY AFTER durable operations complete successfully
+    this.processedStatusKeys.add(idempotencyKey);
 
     // Record status update event in memory buffer for live UI polling fallback
     this.addEventRecord({
@@ -843,7 +848,7 @@ export class WhatsAppService {
     const wamid = incomingMsg.id;
     if (!wamid) return;
 
-    // Fast in-memory deduplication check
+    // Fast in-memory deduplication check (only populated after durable success)
     if (this.processedMessageIds.has(wamid)) {
       return;
     }
@@ -869,8 +874,6 @@ export class WhatsAppService {
       return;
     }
 
-    this.processedMessageIds.add(wamid);
-
     // 2. Find or create Contact in Firestore
     const contact = await whatsappDataRepository.findOrCreateInboundContact({
       organizationId: route.organizationId,
@@ -893,6 +896,9 @@ export class WhatsAppService {
       timestamp: msgTimestamp,
       profileName: meta.contactProfile?.name,
     });
+
+    // Mark as processed in-memory ONLY AFTER durable transaction succeeds
+    this.processedMessageIds.add(wamid);
 
     if (txResult.alreadyProcessed) {
       console.log(`[WhatsAppService] Inbound wamid ${wamid} already processed durably.`);
