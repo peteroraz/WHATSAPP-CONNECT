@@ -225,6 +225,104 @@ class DataStore {
     return true;
   }
 
+  // WhatsApp Client Connection Management (Release B1)
+  async configureClientWhatsAppConnection(params: {
+    clientId: string;
+    wabaId: string;
+    phoneNumberId: string;
+    metaAccessToken: string;
+  }): Promise<{ success: boolean; connection?: WhatsAppConnection; error?: string }> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch('/api/whatsapp/client-connection', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(params),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return {
+          success: false,
+          error: data.error || 'Failed to configure client WhatsApp connection',
+        };
+      }
+
+      const connection: WhatsAppConnection = data.connection;
+      const existingIdx = this.whatsappConnections.findIndex((c) => c.clientId === params.clientId);
+      if (existingIdx >= 0) {
+        this.whatsappConnections[existingIdx] = connection;
+      } else {
+        this.whatsappConnections.push(connection);
+      }
+
+      this.logAudit('Client WhatsApp Configured', 'WhatsAppConnection', connection.id, {
+        clientId: params.clientId,
+        phoneNumberId: params.phoneNumberId,
+        status: connection.connectionStatus,
+      }, params.clientId);
+
+      this.notify();
+      return { success: true, connection };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Network error configuring connection' };
+    }
+  }
+
+  async testClientWhatsAppConnection(clientId: string): Promise<{
+    success: boolean;
+    status: string;
+    connected: boolean;
+    displayPhoneNumber?: string;
+    verifiedName?: string;
+    error?: string;
+  }> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch('/api/whatsapp/test-connection', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ clientId }),
+      });
+
+      const data = await res.json();
+      const isConnected = Boolean(data.connected);
+
+      // Update in-memory connection status
+      const conn = this.whatsappConnections.find((c) => c.clientId === clientId);
+      if (conn) {
+        conn.connectionStatus = isConnected ? 'Connected' : 'Connection Error';
+        conn.lastTestedAt = new Date().toISOString();
+        if (data.displayPhoneNumber) conn.displayPhoneNumber = data.displayPhoneNumber;
+        if (data.verifiedName) conn.verifiedDisplayName = data.verifiedName;
+        if (data.qualityRating) conn.qualityRating = data.qualityRating;
+        this.persistDoc('whatsapp_connections', conn.id, conn);
+        this.notify();
+      }
+
+      return {
+        success: isConnected,
+        status: data.status,
+        connected: isConnected,
+        displayPhoneNumber: data.displayPhoneNumber,
+        verifiedName: data.verifiedName,
+        error: data.error,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        status: 'Connection Error',
+        connected: false,
+        error: err?.message || 'Network error testing connection',
+      };
+    }
+  }
+
+  getClientWhatsAppConnection(clientId?: string): WhatsAppConnection | undefined {
+    const targetId = clientId || this.activeClientId;
+    return this.whatsappConnections.find((c) => c.clientId === targetId);
+  }
+
   // Client-scoped data helper methods (Requirement 17)
   getClientContacts(clientId?: string): Contact[] {
     const targetId = clientId || this.activeClientId;
@@ -1071,10 +1169,15 @@ class DataStore {
     } catch {}
   }
 
-  async syncTemplatesFromMeta(): Promise<{ success: boolean; count: number; error?: string }> {
+  async syncTemplatesFromMeta(targetClientId?: string): Promise<{ success: boolean; count: number; error?: string }> {
     try {
+      const effectiveClientId = targetClientId || this.activeClientId || this.getDefaultWhatsAppClientId();
       const headers = await this.getAuthHeaders();
-      const res = await fetch('/api/whatsapp/sync-templates', { headers });
+      const url = effectiveClientId
+        ? `/api/whatsapp/sync-templates?clientId=${encodeURIComponent(effectiveClientId)}`
+        : '/api/whatsapp/sync-templates';
+
+      const res = await fetch(url, { headers });
       const data = await res.json();
       if (!res.ok || !data.success) {
         return { success: false, count: 0, error: data.error || 'Failed to fetch templates from Meta' };
@@ -1085,18 +1188,17 @@ class DataStore {
         return { success: true, count: 0 };
       }
 
-      const defaultWhatsAppClientId = this.getDefaultWhatsAppClientId();
-
       for (const tpl of metaTemplates) {
-        // Scoped matching logic: only match existing templates belonging to defaultWhatsAppClientId
+        // Scoped matching logic: only match existing templates belonging to effectiveClientId
         const existingIdx = this.templates.findIndex(
           (t) =>
-            t.clientId === defaultWhatsAppClientId &&
+            t.clientId === effectiveClientId &&
             (t.whatsappTemplateId === tpl.whatsappTemplateId || t.name === tpl.name)
         );
         const metaTpl: MessageTemplate = {
           ...tpl,
-          clientId: defaultWhatsAppClientId,
+          id: `tpl_meta_${effectiveClientId}_${tpl.whatsappTemplateId || tpl.name}`,
+          clientId: effectiveClientId,
           organizationId: this.orgId,
           isLiveMeta: true,
           isDemo: false,
@@ -1725,7 +1827,18 @@ class DataStore {
     }
 
     const campaignId = `cmp_${Date.now()}`;
-    const isServerConnected = this.serverWhatsAppStatus === 'Connected';
+
+    // Requirement 7: Resolve the WhatsApp connection belonging to this Client
+    const clientConn = this.whatsappConnections.find((c) => c.clientId === clientId);
+    const hasClientSender = clientConn
+      ? clientConn.connectionStatus === 'Connected'
+      : (clientId.startsWith('client_default_') && this.serverWhatsAppStatus === 'Connected');
+
+    if (!hasClientSender && !clientId.startsWith('client_default_') && !data.isDemo) {
+      throw new Error('This Client does not have a connected WhatsApp sender.');
+    }
+
+    const isServerConnected = hasClientSender;
 
     // Safeguard: if live connection detected but demo mode was requested
     if (data.isDemo === true && isServerConnected) {
@@ -1758,6 +1871,7 @@ class DataStore {
           variableMapping: data.variableMapping || {},
           variableFallbacks: data.variableFallbacks || {},
           isLiveMode: true,
+          clientId,
         }),
       });
 
@@ -2040,7 +2154,24 @@ class DataStore {
     const cleanPhone = (conv.contactPhone || '').replace(/\D/g, '');
     if (!cleanPhone) throw new Error('Conversation contact has no valid phone number');
 
-    const isServerConnected = this.serverWhatsAppStatus === 'Connected';
+    const clientId = conv.clientId || this.requireActiveClientId();
+
+    // Check client-specific WhatsApp connection
+    const clientConn = this.whatsappConnections.find((c) => c.clientId === clientId);
+    const hasClientSender = clientConn
+      ? clientConn.connectionStatus === 'Connected'
+      : (clientId.startsWith('client_default_') && this.serverWhatsAppStatus === 'Connected');
+
+    // Requirement 6: If Client has no connected WhatsApp connection: block sending and display:
+    // "This Client does not have a connected WhatsApp sender."
+    if (!hasClientSender && !clientId.startsWith('client_default_') && clientConn?.connectionType === 'client_managed') {
+      throw new Error('This Client does not have a connected WhatsApp sender.');
+    }
+    if (!clientConn && !clientId.startsWith('client_default_')) {
+      throw new Error('This Client does not have a connected WhatsApp sender.');
+    }
+
+    const isServerConnected = hasClientSender;
 
     // Safeguard: if server is Connected but demo mode was explicitly requested
     if (isLiveModeParam === false && isServerConnected) {
@@ -2069,8 +2200,6 @@ class DataStore {
       }
     }
 
-    const clientId = conv.clientId || this.requireActiveClientId();
-
     if (isLiveMode) {
       // LIVE MODE: Call Meta WhatsApp Cloud API via server endpoint. Do NOT create message locally until Meta returns success and real wamid
       const headers = await this.getAuthHeaders();
@@ -2081,6 +2210,7 @@ class DataStore {
           to: cleanPhone,
           messageType: 'text',
           body: text,
+          clientId,
         }),
       });
 
@@ -2177,7 +2307,24 @@ class DataStore {
     const cleanPhone = (conv.contactPhone || '').replace(/\D/g, '');
     if (!cleanPhone) throw new Error('Conversation contact has no valid phone number');
 
-    const isServerConnected = this.serverWhatsAppStatus === 'Connected';
+    const clientId = conv.clientId || this.requireActiveClientId();
+
+    // Check client-specific WhatsApp connection
+    const clientConn = this.whatsappConnections.find((c) => c.clientId === clientId);
+    const hasClientSender = clientConn
+      ? clientConn.connectionStatus === 'Connected'
+      : (clientId.startsWith('client_default_') && this.serverWhatsAppStatus === 'Connected');
+
+    // Requirement 6: If Client has no connected WhatsApp connection: block sending and display:
+    // "This Client does not have a connected WhatsApp sender."
+    if (!hasClientSender && !clientId.startsWith('client_default_') && clientConn?.connectionType === 'client_managed') {
+      throw new Error('This Client does not have a connected WhatsApp sender.');
+    }
+    if (!clientConn && !clientId.startsWith('client_default_')) {
+      throw new Error('This Client does not have a connected WhatsApp sender.');
+    }
+
+    const isServerConnected = hasClientSender;
 
     // Safeguard: if server is Connected but demo mode was requested
     if (isLiveModeParam === false && isServerConnected) {
@@ -2224,8 +2371,6 @@ class DataStore {
           ]
         : undefined;
 
-    const clientId = conv.clientId || this.requireActiveClientId();
-
     if (isLiveMode) {
       const headers = await this.getAuthHeaders();
       const response = await fetch(this.getApiUrl('/api/whatsapp/send-message'), {
@@ -2237,6 +2382,7 @@ class DataStore {
           templateName: template.name,
           languageCode: template.language || 'en_US',
           components,
+          clientId,
         }),
       });
 

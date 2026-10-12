@@ -207,6 +207,55 @@ export class WhatsAppDataRepository {
   }
 
   /**
+   * 2b. Register client-specific route in whatsapp_phone_routes/{phoneNumberId}
+   */
+  async registerClientRoute(
+    phoneNumberId: string,
+    organizationId: string,
+    clientId: string
+  ): Promise<{ success: boolean; phoneNumberId: string; error?: string }> {
+    if (!phoneNumberId) {
+      return { success: false, phoneNumberId: '', error: 'phoneNumberId is required.' };
+    }
+
+    const now = new Date().toISOString();
+    const existing = this.routes.get(phoneNumberId);
+
+    const routeData: WhatsAppPhoneRoute = {
+      phoneNumberId,
+      organizationId,
+      clientId,
+      active: true,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+
+    if (isProduction) {
+      try {
+        const docRef = adminDb.collection('whatsapp_phone_routes').doc(phoneNumberId);
+        await docRef.set(routeData, { merge: true });
+        this.routes.set(phoneNumberId, routeData);
+        return { success: true, phoneNumberId };
+      } catch (err: any) {
+        this.handleProductionError('registerClientRoute', err);
+      }
+    }
+
+    // Development / preview memory mode
+    this.routes.set(phoneNumberId, routeData);
+    if (this.adminDbAvailable) {
+      try {
+        const docRef = adminDb.collection('whatsapp_phone_routes').doc(phoneNumberId);
+        await docRef.set(routeData, { merge: true });
+      } catch (err: any) {
+        this.handleDevAdminNotice(err);
+      }
+    }
+
+    return { success: true, phoneNumberId };
+  }
+
+  /**
    * 3. Persist durable webhook event to Firestore
    * Idempotent by deterministic ID: incoming_<wamid> or status_<wamid>_<status>
    * In production: must successfully persist to Firestore.

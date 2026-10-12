@@ -144,7 +144,12 @@ function MainApp({ onNavigate }: MainAppProps) {
     }
   };
 
-  const isWhatsAppConnected = dataStore.serverWhatsAppStatus === 'Connected';
+  const activeClientConn = dataStore.whatsappConnections.find((c) => c.clientId === activeClientId);
+  const activeClientWhatsAppConnected = activeClientConn
+    ? activeClientConn.connectionStatus === 'Connected'
+    : (activeClientId.startsWith('client_default_') && dataStore.serverWhatsAppStatus === 'Connected');
+
+  const isWhatsAppConnected = Boolean(activeClientWhatsAppConnected);
   const effectiveOrg = currentOrg ? { ...currentOrg, whatsappConnected: isWhatsAppConnected } : currentOrg;
 
   return (
@@ -156,6 +161,7 @@ function MainApp({ onNavigate }: MainAppProps) {
       unreadMessagesCount={unreadCount}
       clients={dataStore.clients}
       activeClientId={dataStore.activeClientId}
+      whatsappConnections={dataStore.whatsappConnections}
       onSelectClient={handleClientChange}
       onLogout={handleLogout}
       onOpenSimulator={() => setIsSimulatorOpen(true)}
@@ -191,6 +197,9 @@ function MainApp({ onNavigate }: MainAppProps) {
           onAddClient={(data) => dataStore.addClient(data)}
           onUpdateClient={(id, updates) => dataStore.updateClient(id, updates)}
           onToggleClientStatus={(id) => dataStore.toggleClientStatus(id)}
+          onConfigureConnection={(creds) => dataStore.configureClientWhatsAppConnection(creds)}
+          onTestConnection={(clientId) => dataStore.testClientWhatsAppConnection(clientId)}
+          onSyncTemplates={(clientId) => dataStore.syncTemplatesFromMeta(clientId)}
         />
       )}
 

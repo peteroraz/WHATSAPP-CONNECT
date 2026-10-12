@@ -12,7 +12,11 @@ import {
   Radio, 
   CheckCircle,
   AlertCircle,
-  Sparkles
+  Sparkles,
+  KeyRound,
+  RefreshCw,
+  PhoneCall,
+  FileText
 } from 'lucide-react';
 import { 
   Client, 
@@ -24,6 +28,7 @@ import {
 import { Badge } from '../common/Badge.tsx';
 import { EmptyState } from '../common/EmptyState.tsx';
 import { ClientModal } from './ClientModal.tsx';
+import { ClientConnectionModal } from './ClientConnectionModal.tsx';
 import { useToast } from '../common/Toast.tsx';
 
 export interface ClientsViewProps {
@@ -38,6 +43,14 @@ export interface ClientsViewProps {
   onAddClient: (clientData: Omit<Client, 'id' | 'organizationId' | 'createdAt' | 'updatedAt'>) => void;
   onUpdateClient: (id: string, updates: Partial<Client>) => void;
   onToggleClientStatus: (id: string) => void;
+  onConfigureConnection?: (credentials: {
+    clientId: string;
+    wabaId: string;
+    phoneNumberId: string;
+    metaAccessToken: string;
+  }) => Promise<any>;
+  onTestConnection?: (clientId: string) => Promise<any>;
+  onSyncTemplates?: (clientId: string) => Promise<any>;
 }
 
 export const ClientsView: React.FC<ClientsViewProps> = ({
@@ -52,11 +65,19 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   onAddClient,
   onUpdateClient,
   onToggleClientStatus,
+  onConfigureConnection,
+  onTestConnection,
+  onSyncTemplates,
 }) => {
   const { toast } = useToast();
   const [searchQuery, setSearchQuery] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingClient, setEditingClient] = useState<Client | null>(null);
+
+  // Connection management modal state
+  const [connectionModalClient, setConnectionModalClient] = useState<Client | null>(null);
+  const [testingClientId, setTestingClientId] = useState<string | null>(null);
+  const [syncingClientId, setSyncingClientId] = useState<string | null>(null);
 
   const filteredClients = clients.filter((c) => {
     if (searchQuery.trim()) {
@@ -74,35 +95,74 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
     setIsModalOpen(true);
   };
 
-  const handleOpenEdit = (c: Client) => {
-    setEditingClient(c);
+  const handleOpenEdit = (client: Client) => {
+    setEditingClient(client);
     setIsModalOpen(true);
   };
 
-  const handleSaveModal = (data: any) => {
+  const handleSaveModal = (data: Omit<Client, 'id' | 'organizationId' | 'createdAt' | 'updatedAt'>) => {
     if (editingClient) {
       onUpdateClient(editingClient.id, data);
       toast(`Client "${data.name}" updated successfully.`);
     } else {
       onAddClient(data);
-      toast(`Client "${data.name}" created successfully.`);
+      toast(`Client "${data.name}" added successfully.`);
+    }
+    setIsModalOpen(false);
+  };
+
+  const handleToggleStatus = (client: Client) => {
+    onToggleClientStatus(client.id);
+    const newStatus = client.status === 'Active' ? 'Inactive' : 'Active';
+    toast(`Client "${client.name}" marked as ${newStatus}.`);
+  };
+
+  const handleOpenConfigure = (client: Client) => {
+    setConnectionModalClient(client);
+  };
+
+  const handleTestConnectionClick = async (client: Client) => {
+    if (!onTestConnection) return;
+    setTestingClientId(client.id);
+    try {
+      const res = await onTestConnection(client.id);
+      if (res && res.connected) {
+        toast(`WhatsApp Connection verified successfully for ${client.name}! (${res.displayPhoneNumber || res.verifiedName || 'Connected'})`);
+      } else {
+        toast(res?.error || `Connection test failed for ${client.name}`, 'error');
+      }
+    } catch (err: any) {
+      toast(err?.message || 'Error testing connection', 'error');
+    } finally {
+      setTestingClientId(null);
     }
   };
 
-  const handleToggleStatus = (c: Client) => {
-    onToggleClientStatus(c.id);
-    const nextStatus = c.status === 'Active' ? 'Inactive' : 'Active';
-    toast(`Client "${c.name}" is now ${nextStatus}.`);
+  const handleSyncTemplatesClick = async (client: Client) => {
+    if (!onSyncTemplates) return;
+    setSyncingClientId(client.id);
+    try {
+      const res = await onSyncTemplates(client.id);
+      if (res && res.success) {
+        toast(`Synchronized ${res.count} template(s) from Meta for ${client.name}.`);
+      } else {
+        toast(res?.error || `Failed to sync templates for ${client.name}`, 'error');
+      }
+    } catch (err: any) {
+      toast(err?.message || 'Error syncing templates', 'error');
+    } finally {
+      setSyncingClientId(null);
+    }
   };
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Header */}
+      {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-slate-900">Client Accounts</h2>
+          <h2 className="text-xl font-bold text-slate-900">Clients & WhatsApp Senders</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Manage third-party business clients, isolate audiences, and configure multi-business messaging.
+            Manage multi-tenant business clients and configure dedicated Meta WhatsApp sender identities.
           </p>
         </div>
 
@@ -110,33 +170,29 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           id="add-client-btn"
           type="button"
           onClick={handleOpenAdd}
-          className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors self-start sm:self-auto"
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors self-start sm:self-auto"
         >
           <Plus className="w-3.5 h-3.5" />
-          Add Client
+          <span>Add Client</span>
         </button>
       </div>
 
-      {/* Search & Overview bar */}
-      <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        <div className="relative flex-1 max-w-md">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+      {/* Search and Filters Bar */}
+      <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="relative w-full sm:w-80">
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-3 pointer-events-none" />
           <input
             id="client-search-input"
             type="text"
+            placeholder="Search by client name, code, contact..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by client name, code, or contact person..."
-            className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+            className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500 bg-slate-50/50"
           />
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
-          <span>Total: <strong className="text-slate-800">{clients.length}</strong></span>
-          <span>•</span>
-          <span>Active: <strong className="text-emerald-700">{clients.filter((c) => c.status === 'Active').length}</strong></span>
-          <span>•</span>
-          <span>Inactive: <strong className="text-slate-600">{clients.filter((c) => c.status === 'Inactive').length}</strong></span>
+        <div className="flex items-center gap-2 self-end sm:self-auto text-xs text-slate-500 font-medium">
+          <span>{filteredClients.length} of {clients.length} clients</span>
         </div>
       </div>
 
@@ -174,9 +230,11 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                   const clientCampaignsCount = campaigns.filter((c) => c.clientId === client.id).length;
                   const clientConversationsCount = conversations.filter((c) => c.clientId === client.id).length;
                   
-                  // Connection metadata: A Client is Connected only when its own WhatsAppConnection has connectionStatus === 'Connected'
+                  // Connection metadata
                   const conn = whatsappConnections.find((w) => w.clientId === client.id);
                   const isConnected = conn?.connectionStatus === 'Connected';
+                  const isTestingThis = testingClientId === client.id;
+                  const isSyncingThis = syncingClientId === client.id;
 
                   return (
                     <tr
@@ -241,20 +299,98 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                         )}
                       </td>
 
-                      <td className="py-3.5 px-3">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'
-                            }`}
-                          />
-                          <span className={`text-xs ${isConnected ? 'text-emerald-700 font-semibold' : 'text-slate-600'}`}>
-                            {isConnected ? 'Connected' : 'Not Configured'}
-                          </span>
+                      {/* WhatsApp Connection Column (Requirement 3) */}
+                      <td className="py-3.5 px-3 min-w-[200px]">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                isConnected
+                                  ? 'bg-emerald-500 animate-pulse'
+                                  : conn?.connectionStatus === 'Testing'
+                                  ? 'bg-amber-500'
+                                  : conn?.connectionStatus === 'Connection Error'
+                                  ? 'bg-rose-500'
+                                  : 'bg-slate-300'
+                              }`}
+                            />
+                            <span className={`text-xs font-semibold ${
+                              isConnected
+                                ? 'text-emerald-700'
+                                : conn?.connectionStatus === 'Connection Error'
+                                ? 'text-rose-700'
+                                : 'text-slate-600'
+                            }`}>
+                              {conn?.connectionStatus || 'Not Configured'}
+                            </span>
+                            {conn?.connectionType === 'default_env' && (
+                              <span className="text-[9px] bg-slate-100 text-slate-600 px-1 py-0.2 rounded font-mono">
+                                default_env
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="text-[11px] text-slate-600">
+                            {conn?.displayPhoneNumber ? (
+                              <span className="font-mono font-medium">{conn.displayPhoneNumber}</span>
+                            ) : conn?.verifiedDisplayName ? (
+                              <span>{conn.verifiedDisplayName}</span>
+                            ) : (
+                              <span className="text-slate-400 italic text-[10px]">No phone identity</span>
+                            )}
+                          </div>
+
+                          {conn?.wabaId && (
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              WABA: {conn.wabaId}
+                            </div>
+                          )}
+
+                          {conn?.lastTestedAt && (
+                            <div className="text-[9px] text-slate-400">
+                              Tested: {new Date(conn.lastTestedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          )}
+
+                          {/* Quick Actions for WhatsApp Connection */}
+                          <div className="flex items-center gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenConfigure(client)}
+                              className="px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded border border-emerald-200 transition-colors inline-flex items-center gap-1"
+                              title="Configure Meta WhatsApp credentials"
+                            >
+                              <KeyRound className="w-2.5 h-2.5" />
+                              Configure
+                            </button>
+
+                            {(isConnected || conn?.phoneNumberId) && (
+                              <button
+                                type="button"
+                                disabled={isTestingThis}
+                                onClick={() => handleTestConnectionClick(client)}
+                                className="px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 rounded border border-slate-200 transition-colors inline-flex items-center gap-1 disabled:opacity-50"
+                                title="Test connection with Meta Graph API"
+                              >
+                                <RefreshCw className={`w-2.5 h-2.5 ${isTestingThis ? 'animate-spin' : ''}`} />
+                                Test
+                              </button>
+                            )}
+
+                            {isConnected && (
+                              <button
+                                type="button"
+                                disabled={isSyncingThis}
+                                onClick={() => handleSyncTemplatesClick(client)}
+                                className="px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 rounded border border-blue-200 transition-colors inline-flex items-center gap-1 disabled:opacity-50"
+                                title="Sync Meta Templates for this Client"
+                              >
+                                <FileText className={`w-2.5 h-2.5 ${isSyncingThis ? 'animate-spin' : ''}`} />
+                                Sync Templates
+                              </button>
+                            )}
+                          </div>
                         </div>
-                        <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                          {conn?.displayPhoneNumber || (conn ? 'Production WhatsApp Cloud API' : '—')}
-                        </span>
                       </td>
 
                       <td className="py-3.5 px-3 text-center font-semibold text-slate-700">
@@ -314,13 +450,28 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
         </div>
       )}
 
-      {/* Add / Edit Modal */}
+      {/* Add / Edit Client Modal */}
       <ClientModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onSave={handleSaveModal}
         client={editingClient}
       />
+
+      {/* Configure Client WhatsApp Connection Modal (Requirement 4) */}
+      {connectionModalClient && (
+        <ClientConnectionModal
+          isOpen={Boolean(connectionModalClient)}
+          onClose={() => setConnectionModalClient(null)}
+          client={connectionModalClient}
+          connection={whatsappConnections.find((w) => w.clientId === connectionModalClient.id)}
+          onSave={async (credentials) => {
+            if (onConfigureConnection) {
+              await onConfigureConnection(credentials);
+            }
+          }}
+        />
+      )}
     </div>
   );
 };

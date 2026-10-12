@@ -17,7 +17,7 @@ import {
   Bot,
   ChevronDown
 } from 'lucide-react';
-import { Organization, UserProfile, Client } from '../../types/index.ts';
+import { Organization, UserProfile, Client, WhatsAppConnection } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { AppLogo } from '../common/AppLogo.tsx';
 
@@ -39,6 +39,7 @@ export interface AppLayoutProps {
   unreadMessagesCount: number;
   clients?: Client[];
   activeClientId?: string;
+  whatsappConnections?: WhatsAppConnection[];
   onSelectClient?: (clientId: string) => void;
   onLogout: () => void;
   onOpenSimulator: () => void;
@@ -55,6 +56,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   unreadMessagesCount,
   clients = [],
   activeClientId = '',
+  whatsappConnections = [],
   onSelectClient,
   onLogout,
   onOpenSimulator,
@@ -180,6 +182,24 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                 </select>
                 <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
               </div>
+
+              {/* Client-specific connection indicator (Requirement 10) */}
+              {(() => {
+                const activeConn = whatsappConnections.find((w) => w.clientId === activeClientId);
+                const isConn = activeConn?.connectionStatus === 'Connected';
+                return (
+                  <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-slate-100 text-[11px]">
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        isConn ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'
+                      }`}
+                    />
+                    <span className={`truncate font-medium ${isConn ? 'text-emerald-700' : 'text-slate-500'}`}>
+                      {isConn ? 'WhatsApp Connected' : 'WhatsApp Not Connected'}
+                    </span>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>

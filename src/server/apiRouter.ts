@@ -8,6 +8,12 @@ import type { AutomationRule } from '../types/index.ts';
 import { normalizePhoneNumber } from '../utils/phoneUtils.ts';
 import { isProduction } from './firebaseAdmin.ts';
 import { authenticateFirebaseUser, requireRole } from './authMiddleware.ts';
+import {
+  getWhatsAppConnection,
+  storeClientCredentials,
+  clientConnectionsCache,
+} from './credentialStore.ts';
+import type { WhatsAppConnection } from '../types/index.ts';
 
 export const apiRouter: Router = express.Router();
 
@@ -149,8 +155,81 @@ apiRouter.post(
 );
 
 /**
+ * CONFIGURE CLIENT WHATSAPP CONNECTION (POST /api/whatsapp/client-connection)
+ * Receives credentials server-side, encrypts/stores token safely, registers route,
+ * verifies connection with Meta API, and returns sanitized WhatsAppConnection document.
+ * Never stores or returns token in the response or in Firestore documents.
+ */
+apiRouter.post(
+  '/whatsapp/client-connection',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin']),
+  async (req: Request, res: Response) => {
+    try {
+      const organizationId = (req as any).user?.organizationId || req.headers['x-organization-id'] as string;
+      const { clientId, wabaId, phoneNumberId, metaAccessToken } = req.body;
+
+      if (!clientId || !phoneNumberId || !metaAccessToken) {
+        return res.status(400).json({
+          success: false,
+          error: 'clientId, phoneNumberId, and metaAccessToken are required.',
+        });
+      }
+
+      // 1. First test connection with Meta server-side
+      const testResult = await whatsappService.testConnection({
+        connection: {
+          accessToken: metaAccessToken.trim(),
+          phoneNumberId: phoneNumberId.trim(),
+          wabaId: (wabaId || '').trim(),
+          apiVersion: 'v21.0',
+          connectionType: 'client_managed',
+        },
+      });
+
+      const isConnected = testResult.connected;
+
+      // 2. Securely store credentials in server CredentialStore
+      const connectionDoc = await storeClientCredentials({
+        organizationId,
+        clientId,
+        wabaId: (wabaId || '').trim(),
+        phoneNumberId: phoneNumberId.trim(),
+        metaAccessToken,
+        displayPhoneNumber: testResult.displayPhoneNumber,
+        verifiedDisplayName: testResult.verifiedName,
+        qualityRating: testResult.qualityRating,
+        connectionStatus: isConnected ? 'Connected' : 'Connection Error',
+      });
+
+      // 3. Register route in whatsapp_phone_routes so inbound webhooks route to this client!
+      if (isConnected) {
+        await whatsappDataRepository.registerClientRoute(
+          phoneNumberId.trim(),
+          organizationId,
+          clientId
+        );
+      }
+
+      return res.json({
+        success: isConnected,
+        connection: connectionDoc,
+        metaStatus: testResult,
+      });
+    } catch (err: any) {
+      console.error('[API Router] Error configuring client WhatsApp connection:', err);
+      return res.status(500).json({
+        success: false,
+        error: err?.message || 'Failed to configure client WhatsApp connection',
+      });
+    }
+  }
+);
+
+/**
  * TEST CONNECTION (POST /api/whatsapp/test-connection)
  * Performs safe server-side API request and returns non-sensitive connection information only.
+ * Connection-aware: resolves client-specific connection if clientId is supplied.
  * Never returns access token or App Secret.
  * Handles missing credentials gracefully without throwing.
  */
@@ -158,9 +237,31 @@ apiRouter.post(
   '/whatsapp/test-connection',
   authenticateFirebaseUser,
   requireRole(['owner', 'admin', 'agent']),
-  async (_req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     try {
-      const result = await whatsappService.testConnection();
+      const organizationId = (req as any).user?.organizationId || req.headers['x-organization-id'] as string;
+      const clientId = req.body?.clientId || (req.query?.clientId as string);
+
+      let connection = null;
+      if (clientId) {
+        connection = await getWhatsAppConnection(clientId, organizationId);
+      }
+
+      const result = await whatsappService.testConnection({ connection });
+
+      // If connection was tested for a specific client, update its status record idempotently
+      if (clientId && connection) {
+        const cached = clientConnectionsCache.get(clientId);
+        if (cached) {
+          cached.connectionStatus = result.connected ? 'Connected' : 'Connection Error';
+          cached.lastTestedAt = new Date().toISOString();
+          if (result.displayPhoneNumber) cached.displayPhoneNumber = result.displayPhoneNumber;
+          if (result.verifiedName) cached.verifiedDisplayName = result.verifiedName;
+          if (result.qualityRating) cached.qualityRating = result.qualityRating;
+          await whatsappDataRepository.registerClientRoute(connection.phoneNumberId, organizationId, clientId);
+        }
+      }
+
       return res.json(result);
     } catch (error: any) {
       return res.status(500).json({
@@ -176,12 +277,30 @@ apiRouter.post(
 /**
  * GET/SYNC TEMPLATES (GET/POST /api/whatsapp/sync-templates)
  * Synchronize approved templates from WhatsApp Business Account.
+ * Connection-aware: resolves client-specific connection if clientId is supplied.
  * Returns Meta templates with status, components, and variables.
  */
-const handleSyncTemplates = async (_req: Request, res: Response) => {
+const handleSyncTemplates = async (req: Request, res: Response) => {
   try {
-    const result = await whatsappService.getTemplates();
-    return res.json(result);
+    const organizationId = (req as any).user?.organizationId || req.headers['x-organization-id'] as string;
+    const clientId = (req.body?.clientId || req.query?.clientId) as string | undefined;
+
+    let connection = null;
+    if (clientId) {
+      connection = await getWhatsAppConnection(clientId, organizationId);
+      if (!connection) {
+        return res.status(400).json({
+          success: false,
+          error: 'This Client does not have a connected WhatsApp sender.',
+        });
+      }
+    }
+
+    const result = await whatsappService.getTemplates({ connection });
+    return res.json({
+      ...result,
+      clientId: clientId || null,
+    });
   } catch (err: any) {
     return res.status(500).json({
       success: false,
@@ -304,7 +423,8 @@ apiRouter.post(
   requireRole(['owner', 'admin', 'agent']),
   async (req: Request, res: Response) => {
     try {
-      const { to, messageType, body, templateName, languageCode, components, outsideCustomerWindow } = req.body;
+      const organizationId = (req as any).user?.organizationId || req.headers['x-organization-id'] as string;
+      const { to, messageType, body, templateName, languageCode, components, outsideCustomerWindow, clientId } = req.body;
 
       if (!to) {
         return res.status(400).json({ error: 'Recipient phone number is required' });
@@ -316,10 +436,20 @@ apiRouter.post(
         return res.status(400).json({ error: 'Recipient phone number contains no valid digits' });
       }
 
-      const { configured } = whatsappService.getCredentials();
+      // Resolve client-specific connection
+      const connection = await getWhatsAppConnection(clientId, organizationId);
+      const isConfigured = Boolean(connection?.accessToken && connection?.phoneNumberId);
+
+      // Requirement 6: If Client has no connected WhatsApp connection: block sending and display clear message
+      if (clientId && !clientId.startsWith('client_default_') && !isConfigured) {
+        return res.status(400).json({
+          success: false,
+          error: 'This Client does not have a connected WhatsApp sender.',
+        });
+      }
 
       // In Live Mode: Enforce 24-hour customer window for free-form text messages
-      if (configured && messageType === 'text' && outsideCustomerWindow) {
+      if (isConfigured && messageType === 'text' && outsideCustomerWindow) {
         return res.status(400).json({
           success: false,
           error:
@@ -336,6 +466,7 @@ apiRouter.post(
           templateName,
           languageCode: languageCode || 'en_US',
           components,
+          connection,
         });
         return res.json(result);
       }
@@ -344,7 +475,11 @@ apiRouter.post(
         return res.status(400).json({ error: 'Message body cannot be empty' });
       }
 
-      const result = await whatsappService.sendTextMessage({ to: normalizedTo, body: body.trim() });
+      const result = await whatsappService.sendTextMessage({
+        to: normalizedTo,
+        body: body.trim(),
+        connection,
+      });
       return res.json(result);
     } catch (err: any) {
       return res.status(500).json({
@@ -372,8 +507,9 @@ apiRouter.post(
   authenticateFirebaseUser,
   requireRole(['owner', 'admin']),
   async (req: Request, res: Response) => {
-  try {
-    const { campaignName, template, recipients, variableMapping, variableFallbacks, isLiveMode } = req.body;
+    try {
+      const organizationId = (req as any).user?.organizationId || req.headers['x-organization-id'] as string;
+      const { campaignName, template, recipients, variableMapping, variableFallbacks, isLiveMode, clientId } = req.body;
 
     if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
       return res.status(400).json({ error: 'No recipients provided for broadcast' });
@@ -383,8 +519,18 @@ apiRouter.post(
       return res.status(400).json({ error: 'A valid template is required for broadcasts' });
     }
 
-    const { configured } = whatsappService.getCredentials();
-    const isLive = Boolean(isLiveMode && configured);
+    // Resolve client-specific WhatsApp connection
+    const connection = await getWhatsAppConnection(clientId, organizationId);
+    const isConfigured = Boolean(connection?.accessToken && connection?.phoneNumberId);
+
+    // Requirement 7: Every broadcast must resolve the WhatsApp connection belonging to that Client
+    if (clientId && !clientId.startsWith('client_default_') && !isConfigured && isLiveMode) {
+      return res.status(400).json({
+        error: 'This Client does not have a connected WhatsApp sender.',
+      });
+    }
+
+    const isLive = Boolean(isLiveMode && isConfigured);
 
     // Rule: In Live Mode, only APPROVED templates may be sent live
     if (isLive) {
@@ -506,6 +652,7 @@ apiRouter.post(
           templateName: template.name,
           languageCode: template.language || 'en_US',
           components,
+          connection,
         });
 
         if (result.success) {

@@ -540,29 +540,80 @@ export const InboxView: React.FC<InboxViewProps> = ({
 
             {/* Chat Input Bar */}
             <div className="p-3 bg-white border-t border-slate-200">
-              {activeContact?.optOut ? (
-                <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-lg flex items-center justify-between">
-                  <span>
-                    This contact has opted out of messages. Manual replies are restricted until they
-                    resubscribe.
-                  </span>
-                </div>
-              ) : !sessionWindow.isOpen && organization.whatsappConnected ? (
-                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 font-semibold text-amber-900">
-                      <Clock className="w-4 h-4 text-amber-600" />
-                      <span>24-Hour Customer Window Expired</span>
+              {(() => {
+                const convClientId = activeConversation.clientId || dataStore.activeClientId;
+                const clientConn = dataStore.whatsappConnections.find((w) => w.clientId === convClientId);
+                const hasConnectedSender = clientConn
+                  ? clientConn.connectionStatus === 'Connected'
+                  : (convClientId.startsWith('client_default_') && organization.whatsappConnected);
+
+                if (!hasConnectedSender && !convClientId.startsWith('client_default_')) {
+                  return (
+                    <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-lg flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                        <span className="font-semibold">This Client does not have a connected WhatsApp sender.</span>
+                      </div>
+                      <span className="text-[11px] text-rose-600">Configure connection in Clients tab</span>
                     </div>
-                    <Badge variant="amber" size="sm">Template Required</Badge>
-                  </div>
-                  <p className="text-[11px] text-amber-800 leading-relaxed">
-                    Meta WhatsApp Business Platform policy restricts free-form text messages outside the 24-hour service window. To restart communication, send an approved Message Template.
-                  </p>
-                  <div>
+                  );
+                }
+
+                if (activeContact?.optOut) {
+                  return (
+                    <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-lg flex items-center justify-between">
+                      <span>
+                        This contact has opted out of messages. Manual replies are restricted until they
+                        resubscribe.
+                      </span>
+                    </div>
+                  );
+                }
+
+                if (!sessionWindow.isOpen && organization.whatsappConnected) {
+                  return (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 font-semibold text-amber-900">
+                          <Clock className="w-4 h-4 text-amber-600" />
+                          <span>24-Hour Customer Window Expired</span>
+                        </div>
+                        <Badge variant="amber" size="sm">Template Required</Badge>
+                      </div>
+                      <p className="text-[11px] text-amber-800 leading-relaxed">
+                        Meta WhatsApp Business Platform policy restricts free-form text messages outside the 24-hour service window. To restart communication, send an approved Message Template.
+                      </p>
+                      <div>
+                        <button
+                          id="inbox-send-template-btn"
+                          type="button"
+                          onClick={() => {
+                            if (eligibleTemplates.length > 0) {
+                              const chosen =
+                                eligibleTemplates.find((t) => t.name === 'hello_world') || eligibleTemplates[0];
+                              setSelectedTemplateId(chosen.id);
+                              setTemplateVariables({
+                                '1': activeContact?.firstName || 'Customer',
+                                '2': activeContact?.company || organization.name,
+                              });
+                            }
+                            setIsTemplateModalOpen(true);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-md shadow-xs transition-colors"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          Send Approved Template
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <form onSubmit={handleSend} className="flex items-center gap-2">
                     <button
-                      id="inbox-send-template-btn"
                       type="button"
+                      title="Send an Approved Message Template"
                       onClick={() => {
                         if (eligibleTemplates.length > 0) {
                           const chosen =
@@ -575,59 +626,36 @@ export const InboxView: React.FC<InboxViewProps> = ({
                         }
                         setIsTemplateModalOpen(true);
                       }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-md shadow-xs transition-colors"
+                      className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-slate-200"
                     >
-                      <FileText className="w-3.5 h-3.5" />
-                      Send Approved Template
+                      <FileText className="w-4 h-4" />
                     </button>
-                  </div>
-                </div>
-              ) : (
-                <form onSubmit={handleSend} className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    title="Send an Approved Message Template"
-                    onClick={() => {
-                      if (eligibleTemplates.length > 0) {
-                        const chosen =
-                          eligibleTemplates.find((t) => t.name === 'hello_world') || eligibleTemplates[0];
-                        setSelectedTemplateId(chosen.id);
-                        setTemplateVariables({
-                          '1': activeContact?.firstName || 'Customer',
-                          '2': activeContact?.company || organization.name,
-                        });
-                      }
-                      setIsTemplateModalOpen(true);
-                    }}
-                    className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-slate-200"
-                  >
-                    <FileText className="w-4 h-4" />
-                  </button>
 
-                  <textarea
-                    id="chat-reply-textarea"
-                    rows={1}
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Type WhatsApp message... (Press Enter to send)"
-                    className="flex-1 p-2.5 text-xs border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500 resize-none max-h-24 bg-slate-50"
-                  />
-                  <button
-                    id="chat-send-btn"
-                    type="submit"
-                    disabled={isSending || !replyText.trim()}
-                    className="p-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg transition-colors shadow-xs flex items-center justify-center min-w-[38px] min-h-[38px]"
-                    title="Send WhatsApp Message"
-                  >
-                    {isSending ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-white" />
-                    ) : (
-                      <Send className="w-4 h-4" />
-                    )}
-                  </button>
-                </form>
-              )}
+                    <textarea
+                      id="chat-reply-textarea"
+                      rows={1}
+                      value={replyText}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder="Type WhatsApp message... (Press Enter to send)"
+                      className="flex-1 p-2.5 text-xs border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500 resize-none max-h-24 bg-slate-50"
+                    />
+                    <button
+                      id="chat-send-btn"
+                      type="submit"
+                      disabled={isSending || !replyText.trim()}
+                      className="p-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg transition-colors shadow-xs flex items-center justify-center min-w-[38px] min-h-[38px]"
+                      title="Send WhatsApp Message"
+                    >
+                      {isSending ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-white" />
+                      ) : (
+                        <Send className="w-4 h-4" />
+                      )}
+                    </button>
+                  </form>
+                );
+              })()}
             </div>
           </>
         ) : (

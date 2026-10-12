@@ -11,6 +11,7 @@ import { evaluateAutomationRules } from './automationRunner.ts';
 import { whatsappDataRepository, normalizeE164 } from './whatsappDataRepository.ts';
 import { isProduction } from './firebaseAdmin.ts';
 import type { AutomationRule, MessageTemplate } from '../types/index.ts';
+import type { ResolvedWhatsAppCredentials } from './credentialStore.ts';
 
 export interface WhatsAppConfigStatus {
   configured: boolean;
@@ -35,6 +36,7 @@ export interface WhatsAppConfigStatus {
 export interface SendTextMessageParams {
   to: string; // E.164 without leading '+' or formatted
   body: string;
+  connection?: ResolvedWhatsAppCredentials | null;
 }
 
 export interface SendTemplateMessageParams {
@@ -50,6 +52,15 @@ export interface SendTemplateMessageParams {
       document?: { link: string; filename?: string };
     }>;
   }>;
+  connection?: ResolvedWhatsAppCredentials | null;
+}
+
+export interface TestConnectionParams {
+  connection?: ResolvedWhatsAppCredentials | null;
+}
+
+export interface GetTemplatesParams {
+  connection?: ResolvedWhatsAppCredentials | null;
 }
 
 export interface WhatsAppSendResult {
@@ -219,30 +230,38 @@ export class WhatsAppService {
   /**
    * 1. testConnection()
    * Safe server-side API request returning non-sensitive connection information only.
+   * Can test default environment credentials or a client-specific connection.
    */
-  public async testConnection(): Promise<WhatsAppConfigStatus> {
+  public async testConnection(params?: TestConnectionParams): Promise<WhatsAppConfigStatus> {
     const creds = this.getCredentials();
+    const activeConn = params?.connection;
 
-    if (!creds.configured) {
+    const accessToken = activeConn?.accessToken || creds.accessToken;
+    const phoneNumberId = activeConn?.phoneNumberId || creds.phoneNumberId;
+    const wabaId = activeConn?.wabaId || creds.wabaId;
+    const apiVersion = activeConn?.apiVersion || creds.apiVersion;
+    const isConfigured = Boolean(accessToken && phoneNumberId);
+
+    if (!isConfigured) {
       return {
         configured: false,
         status: 'Not Configured',
         connected: false,
-        apiVersion: creds.apiVersion,
-        hasAccessToken: Boolean(creds.accessToken),
-        hasPhoneNumberId: Boolean(creds.phoneNumberId),
-        hasWabaId: Boolean(creds.wabaId),
+        apiVersion,
+        hasAccessToken: Boolean(accessToken),
+        hasPhoneNumberId: Boolean(phoneNumberId),
+        hasWabaId: Boolean(wabaId),
         hasWebhookVerifyToken: Boolean(creds.webhookVerifyToken),
         hasAppSecret: Boolean(creds.appSecret),
-        message: 'WhatsApp Cloud API credentials are not configured in server environment variables. Workspace is operating in Demo Mode.',
+        message: 'WhatsApp Cloud API credentials are not configured for this sender. Workspace is operating in Demo Mode.',
       };
     }
 
     try {
-      const url = `https://graph.facebook.com/${creds.apiVersion}/${creds.phoneNumberId}?fields=verified_name,display_phone_number,quality_rating,code_verification_status`;
+      const url = `https://graph.facebook.com/${apiVersion}/${phoneNumberId}?fields=verified_name,display_phone_number,quality_rating,code_verification_status`;
       const response = await fetch(url, {
         headers: {
-          Authorization: `Bearer ${creds.accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
       });
@@ -255,10 +274,10 @@ export class WhatsAppService {
           configured: true,
           status: 'Connection Error',
           connected: false,
-          apiVersion: creds.apiVersion,
+          apiVersion,
           hasAccessToken: true,
           hasPhoneNumberId: true,
-          hasWabaId: Boolean(creds.wabaId),
+          hasWabaId: Boolean(wabaId),
           hasWebhookVerifyToken: Boolean(creds.webhookVerifyToken),
           hasAppSecret: Boolean(creds.appSecret),
           error: this.sanitizeError(errorMsg),
@@ -273,12 +292,12 @@ export class WhatsAppService {
         verifiedName: data.verified_name,
         qualityRating: data.quality_rating,
         codeVerificationStatus: data.code_verification_status,
-        phoneNumberId: creds.phoneNumberId,
-        wabaId: creds.wabaId,
-        apiVersion: creds.apiVersion,
+        phoneNumberId,
+        wabaId,
+        apiVersion,
         hasAccessToken: true,
         hasPhoneNumberId: true,
-        hasWabaId: Boolean(creds.wabaId),
+        hasWabaId: Boolean(wabaId),
         hasWebhookVerifyToken: Boolean(creds.webhookVerifyToken),
         hasAppSecret: Boolean(creds.appSecret),
       };
@@ -287,10 +306,10 @@ export class WhatsAppService {
         configured: true,
         status: 'Connection Error',
         connected: false,
-        apiVersion: creds.apiVersion,
+        apiVersion,
         hasAccessToken: true,
         hasPhoneNumberId: true,
-        hasWabaId: Boolean(creds.wabaId),
+        hasWabaId: Boolean(wabaId),
         hasWebhookVerifyToken: Boolean(creds.webhookVerifyToken),
         hasAppSecret: Boolean(creds.appSecret),
         error: this.sanitizeError(err?.message || 'Network error pinging Meta WhatsApp API'),
@@ -315,7 +334,10 @@ export class WhatsAppService {
    * - Automation responses
    * - Live test messages
    */
-  private async dispatchGraphApiMessage(payload: any): Promise<{
+  private async dispatchGraphApiMessage(
+    payload: any,
+    connection?: ResolvedWhatsAppCredentials | null
+  ): Promise<{
     success: boolean;
     messageId?: string;
     httpStatus: number;
@@ -326,22 +348,26 @@ export class WhatsAppService {
     raw?: any;
   }> {
     const creds = this.getCredentials();
-    if (!creds.accessToken || !creds.phoneNumberId) {
+    const accessToken = connection?.accessToken || creds.accessToken;
+    const phoneNumberId = connection?.phoneNumberId || creds.phoneNumberId;
+    const apiVersion = connection?.apiVersion || creds.apiVersion;
+
+    if (!accessToken || !phoneNumberId) {
       return {
         success: false,
         httpStatus: 400,
         errorMessage:
-          'Missing server credentials: WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID is not configured in environment.',
+          'Missing server credentials: WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID is not configured for this sender.',
       };
     }
 
-    const url = `https://graph.facebook.com/${creds.apiVersion}/${creds.phoneNumberId}/messages`;
+    const url = `https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`;
 
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${creds.accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -396,34 +422,27 @@ export class WhatsAppService {
   /**
    * Diagnostic live-send function for Settings -> WhatsApp Cloud API.
    * Sends the official Meta hello_world template server-side only.
-   * Endpoint: POST https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages
-   * Exact requested body:
-   * {
-   *   "messaging_product": "whatsapp",
-   *   "to": "RECIPIENT_NUMBER",
-   *   "type": "template",
-   *   "template": {
-   *     "name": "hello_world",
-   *     "language": {
-   *       "code": "en_US"
-   *     }
-   *   }
-   * }
-   * Never displays or logs the access token.
    */
-  public async sendHelloWorldTest(rawRecipient: string): Promise<HelloWorldDiagnosticResponse> {
+  public async sendHelloWorldTest(
+    rawRecipient: string,
+    connection?: ResolvedWhatsAppCredentials | null
+  ): Promise<HelloWorldDiagnosticResponse> {
     const creds = this.getCredentials();
-    const normalizedRecipient = this.normalizePhone(rawRecipient);
-    const endpoint = `POST https://graph.facebook.com/${creds.apiVersion}/${creds.phoneNumberId || 'NOT_CONFIGURED'}/messages`;
+    const accessToken = connection?.accessToken || creds.accessToken;
+    const phoneNumberId = connection?.phoneNumberId || creds.phoneNumberId;
+    const apiVersion = connection?.apiVersion || creds.apiVersion;
 
-    if (!creds.accessToken || !creds.phoneNumberId) {
+    const normalizedRecipient = this.normalizePhone(rawRecipient);
+    const endpoint = `POST https://graph.facebook.com/${apiVersion}/${phoneNumberId || 'NOT_CONFIGURED'}/messages`;
+
+    if (!accessToken || !phoneNumberId) {
       return {
         success: false,
         endpoint,
         httpStatus: 400,
         recipient: normalizedRecipient,
-        phoneNumberId: creds.phoneNumberId || 'NOT_CONFIGURED',
-        apiVersion: creds.apiVersion,
+        phoneNumberId: phoneNumberId || 'NOT_CONFIGURED',
+        apiVersion,
         errorMessage:
           'Missing server credentials: WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID is not configured in environment.',
       };
@@ -435,8 +454,8 @@ export class WhatsAppService {
         endpoint,
         httpStatus: 400,
         recipient: '',
-        phoneNumberId: creds.phoneNumberId,
-        apiVersion: creds.apiVersion,
+        phoneNumberId,
+        apiVersion,
         errorMessage: 'Recipient phone number is required and cannot be empty.',
       };
     }
@@ -453,15 +472,15 @@ export class WhatsAppService {
       },
     };
 
-    const res = await this.dispatchGraphApiMessage(payload);
+    const res = await this.dispatchGraphApiMessage(payload, connection);
 
     return {
       success: res.success,
       endpoint,
       httpStatus: res.httpStatus,
       recipient: normalizedRecipient,
-      phoneNumberId: creds.phoneNumberId,
-      apiVersion: creds.apiVersion,
+      phoneNumberId,
+      apiVersion,
       wamid: res.messageId,
       errorCode: res.errorCode,
       errorSubcode: res.errorSubcode,
@@ -474,17 +493,20 @@ export class WhatsAppService {
   /**
    * 2. sendTextMessage()
    * Send free-form text message via Meta WhatsApp Business Cloud API.
-   * Endpoint: https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages
+   * Connection-aware: dispatches with client's specific credentials if provided.
    */
   public async sendTextMessage(params: SendTextMessageParams): Promise<WhatsAppSendResult> {
     const creds = this.getCredentials();
+    const isConfigured = Boolean(
+      (params.connection?.accessToken && params.connection?.phoneNumberId) || creds.configured
+    );
     const sanitizedTo = this.normalizePhone(params.to);
 
     if (!sanitizedTo) {
       return { success: false, error: 'Recipient phone number is invalid or empty' };
     }
 
-    if (!creds.configured) {
+    if (!isConfigured) {
       // Demo Mode: simulate sending
       return {
         success: true,
@@ -504,7 +526,7 @@ export class WhatsAppService {
       },
     };
 
-    const res = await this.dispatchGraphApiMessage(payload);
+    const res = await this.dispatchGraphApiMessage(payload, params.connection);
     return {
       success: res.success,
       messageId: res.messageId,
@@ -516,17 +538,20 @@ export class WhatsAppService {
   /**
    * 3. sendTemplateMessage()
    * Send approved template message via Meta WhatsApp Business Cloud API.
-   * Endpoint: https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages
+   * Connection-aware: dispatches with client's specific credentials if provided.
    */
   public async sendTemplateMessage(params: SendTemplateMessageParams): Promise<WhatsAppSendResult> {
     const creds = this.getCredentials();
+    const isConfigured = Boolean(
+      (params.connection?.accessToken && params.connection?.phoneNumberId) || creds.configured
+    );
     const sanitizedTo = this.normalizePhone(params.to);
 
     if (!sanitizedTo) {
       return { success: false, error: 'Recipient phone number is invalid or empty' };
     }
 
-    if (!creds.configured) {
+    if (!isConfigured) {
       // Demo Mode: simulate sending
       return {
         success: true,
@@ -554,7 +579,7 @@ export class WhatsAppService {
       template: templatePayload,
     };
 
-    const res = await this.dispatchGraphApiMessage(payload);
+    const res = await this.dispatchGraphApiMessage(payload, params.connection);
     return {
       success: res.success,
       messageId: res.messageId,
@@ -566,27 +591,30 @@ export class WhatsAppService {
   /**
    * 4. getTemplates()
    * Synchronize approved message templates from WhatsApp Business Account.
-   * Endpoint: https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates
+   * Connection-aware: queries specific client's WABA if provided.
    */
-  public async getTemplates(): Promise<{
+  public async getTemplates(params?: GetTemplatesParams): Promise<{
     success: boolean;
     templates?: any[];
     error?: string;
   }> {
     const creds = this.getCredentials();
+    const accessToken = params?.connection?.accessToken || creds.accessToken;
+    const wabaId = params?.connection?.wabaId || creds.wabaId;
+    const apiVersion = params?.connection?.apiVersion || creds.apiVersion;
 
-    if (!creds.accessToken || !creds.wabaId) {
+    if (!accessToken || !wabaId) {
       return {
         success: false,
-        error: 'WhatsApp Business Account ID or Access Token not configured in server environment variables.',
+        error: 'WhatsApp Business Account ID or Access Token not configured for this sender.',
       };
     }
 
     try {
-      const url = `https://graph.facebook.com/${creds.apiVersion}/${creds.wabaId}/message_templates?limit=100&fields=name,status,category,language,components,id`;
+      const url = `https://graph.facebook.com/${apiVersion}/${wabaId}/message_templates?limit=100&fields=name,status,category,language,components,id`;
       const response = await fetch(url, {
         headers: {
-          Authorization: `Bearer ${creds.accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
       });

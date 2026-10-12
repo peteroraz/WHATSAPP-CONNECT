@@ -63,15 +63,22 @@ export interface WhatsAppConnection {
   organizationId: string;
   clientId: string;
   label: string;
+  connectionType?: 'default_env' | 'client_managed';
+  phoneNumberId?: string;
+  wabaId?: string;
+  secretReference?: string;
   displayPhoneNumber?: string;
   verifiedDisplayName?: string;
+  qualityRating?: string;
+  connectionStatus:
+    | 'Not Configured'
+    | 'Testing'
+    | 'Connected'
+    | 'Connection Error';
+  lastTestedAt?: string;
   wabaIdMasked?: string;
   phoneNumberIdMasked?: string;
   apiVersion?: string;
-  connectionStatus:
-    | 'Not Configured'
-    | 'Connected'
-    | 'Connection Error';
   isDefault?: boolean;
   createdAt: string;
   updatedAt: string;
