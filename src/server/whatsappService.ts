@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { evaluateMessageConsentCommands } from './optOutHandler.ts';
 import { evaluateAutomationRules } from './automationRunner.ts';
 import { whatsappDataRepository, normalizeE164 } from './whatsappDataRepository.ts';
+import { isProduction } from './firebaseAdmin.ts';
 import type { AutomationRule, MessageTemplate } from '../types/index.ts';
 
 export interface WhatsAppConfigStatus {
@@ -771,13 +772,18 @@ export class WhatsAppService {
           eventTimestamp,
           receivedAt: new Date().toISOString(),
           payload: {
+            wamid,
             status,
             recipientId: statusUpdate.recipient_id,
             failureReason,
+            eventTimestamp,
             displayPhoneNumber: meta?.displayPhoneNumber,
           },
         });
       } catch (err: any) {
+        if (isProduction) {
+          throw err;
+        }
         console.warn('[WhatsAppService] Notice persisting status webhook event:', err?.message || err);
       }
     }
@@ -787,6 +793,9 @@ export class WhatsAppService {
       await whatsappDataRepository.updateMessageDeliveryStatus(wamid, status, eventTimestamp, failureReason);
       await whatsappDataRepository.updateCampaignRecipientStatus(wamid, status, eventTimestamp, failureReason);
     } catch (err: any) {
+      if (isProduction) {
+        throw err;
+      }
       console.warn('[WhatsAppService] Notice updating durable message/recipient status:', err?.message || err);
     }
 
@@ -882,6 +891,7 @@ export class WhatsAppService {
       contactName: `${contact.firstName} ${contact.lastName}`.trim() || meta.contactProfile?.name || normalizedPhone,
       text: textBody,
       timestamp: msgTimestamp,
+      profileName: meta.contactProfile?.name,
     });
 
     if (txResult.alreadyProcessed) {

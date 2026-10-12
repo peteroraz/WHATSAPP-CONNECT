@@ -125,23 +125,6 @@ apiRouter.post('/webhook', handleWebhookPost);
  * Maps current WHATSAPP_PHONE_NUMBER_ID to tenant organizationId and defaultClientId.
  * Does not accept phoneNumberId from browser.
  */
-apiRouter.post('/api/whatsapp/register-default-route', async (req: Request, res: Response) => {
-  try {
-    const { organizationId, clientId } = req.body;
-    if (!organizationId || !clientId) {
-      return res.status(400).json({ error: 'organizationId and clientId are required' });
-    }
-    const result = await whatsappDataRepository.registerDefaultRoute(organizationId, clientId);
-    if (!result.success) {
-      return res.status(400).json({ error: result.error });
-    }
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Failed to register default route' });
-  }
-});
-
-// Also mount at /whatsapp/register-default-route for consistency
 apiRouter.post('/whatsapp/register-default-route', async (req: Request, res: Response) => {
   try {
     const { organizationId, clientId } = req.body;
@@ -218,23 +201,8 @@ apiRouter.post('/whatsapp/sync-rules', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/api/whatsapp/sync-rules', (req: Request, res: Response) => {
-  try {
-    const { rules, organizationId, clientId } = req.body;
-    if (Array.isArray(rules)) {
-      whatsappService.updateAutomationRulesCache(rules);
-      if (organizationId && clientId) {
-        whatsappDataRepository.updateAutomationRulesCache(organizationId, clientId, rules);
-      }
-    }
-    return res.json({ success: true, count: Array.isArray(rules) ? rules.length : 0 });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message });
-  }
-});
-
 /**
- * GET WEBHOOK EVENTS (GET /api/whatsapp/events and GET /whatsapp/events)
+ * GET WEBHOOK EVENTS (GET /api/whatsapp/events via /whatsapp/events mount)
  * Serves durable webhook events from Firestore via whatsappDataRepository.
  * Supports since, clientId, and limit (max 500).
  */
@@ -254,14 +222,12 @@ const handleGetEvents = async (req: Request, res: Response) => {
     return res.json({ success: true, events });
   } catch (err: any) {
     console.error('[API Router] Error fetching durable webhook events:', err?.message || err);
-    // In-memory fallback if Firestore read error
     const fallbackEvents = whatsappService.getEventsSince(req.query.since as string);
     return res.json({ success: true, events: fallbackEvents });
   }
 };
 
 apiRouter.get('/whatsapp/events', handleGetEvents);
-apiRouter.get('/api/whatsapp/events', handleGetEvents);
 
 /**
  * DIAGNOSTIC OUTBOUND TEST (POST /api/whatsapp/test-send-hello-world)

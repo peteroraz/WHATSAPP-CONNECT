@@ -6,6 +6,16 @@ import path from 'path';
 let adminApp: App;
 let adminDb: Firestore;
 
+export const isCloudRun = Boolean(process.env.K_SERVICE);
+export const isAiStudioPreview = Boolean(
+  process.env.APP_URL?.includes('ais-dev') ||
+  process.env.APP_URL?.includes('ais-pre') ||
+  process.env.K_SERVICE?.startsWith('ais-dev') ||
+  process.env.K_SERVICE?.startsWith('ais-pre') ||
+  process.env.NODE_ENV === 'development'
+);
+export const isProduction = isCloudRun && !isAiStudioPreview;
+
 function getFirebaseConfig() {
   try {
     const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
@@ -45,15 +55,17 @@ let isFirestoreAdminAvailable = false;
     // Quick test read to verify credentials against the named database
     await adminDb.collection('whatsapp_phone_routes').limit(1).get();
     isFirestoreAdminAvailable = true;
-    console.info('[FirebaseAdmin] Connected to Firestore successfully.');
+    console.info('[WhatsAppRepo] PRODUCTION FIRESTORE active.');
   } catch (err: any) {
-    const msg = String(err?.message || '');
-    if (err?.code === 7 || msg.toLowerCase().includes('permission') || msg.toLowerCase().includes('denied') || msg.toLowerCase().includes('unauthenticated')) {
-      isFirestoreAdminAvailable = false;
-      console.info('[FirebaseAdmin] Admin Firestore running in delegated mode (sandbox ADC without direct IAM). Resilient store active.');
+    isFirestoreAdminAvailable = false;
+    if (isProduction) {
+      console.error(
+        'Firebase Admin Firestore unavailable in production.\nDurable WhatsApp processing cannot continue.'
+      );
     } else {
-      isFirestoreAdminAvailable = false;
-      console.warn('[FirebaseAdmin] Firestore note during initialization:', err?.code || msg);
+      console.info(
+        '[WhatsAppRepo] DEVELOPMENT MEMORY FALLBACK active (local/AI Studio preview mode).'
+      );
     }
   }
 })();

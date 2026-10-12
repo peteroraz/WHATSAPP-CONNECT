@@ -20,7 +20,7 @@ import {
   sanitizeContactRecord,
   getContactConsentStatus 
 } from '../utils/phoneUtils.ts';
-import { db, auth, handleFirestoreError, OperationType } from '../lib/firebase.ts';
+import { db, auth, handleFirestoreError, OperationType, onAuthStateChanged } from '../lib/firebase.ts';
 import { 
   collection, 
   getDocs, 
@@ -59,6 +59,15 @@ class DataStore {
 
   constructor() {
     this.checkServerWhatsAppStatus().catch(() => {});
+    try {
+      onAuthStateChanged(auth, (fbUser) => {
+        if (fbUser && this.orgId && this.activeClientId) {
+          this.subscribeClientFirestore(this.orgId, this.activeClientId);
+        } else if (!fbUser) {
+          this.unsubscribeClientFirestore();
+        }
+      });
+    } catch {}
   }
 
   get isLiveWhatsAppConnected(): boolean {
@@ -695,6 +704,9 @@ class DataStore {
   subscribeClientFirestore(orgId: string, clientId: string) {
     this.unsubscribeClientFirestore();
     if (!orgId || !clientId) return;
+    if (!auth.currentUser) {
+      return;
+    }
 
     try {
       // 1. Conversations real-time listener for current org and active client
@@ -738,7 +750,9 @@ class DataStore {
           this.notify();
         }
       }, (err) => {
-        console.warn('[DataStore] Conversations snapshot listener notice:', err?.message || err);
+        if (auth.currentUser && err?.code !== 'permission-denied') {
+          console.warn('[DataStore] Conversations snapshot listener notice:', err?.message || err);
+        }
       });
 
       // 2. Messages real-time listener for current org and active client
@@ -782,10 +796,14 @@ class DataStore {
           this.notify();
         }
       }, (err) => {
-        console.warn('[DataStore] Messages snapshot listener notice:', err?.message || err);
+        if (auth.currentUser && err?.code !== 'permission-denied') {
+          console.warn('[DataStore] Messages snapshot listener notice:', err?.message || err);
+        }
       });
     } catch (err: any) {
-      console.warn('[DataStore] Error setting up client Firestore listeners:', err?.message || err);
+      if (auth.currentUser && err?.code !== 'permission-denied') {
+        console.warn('[DataStore] Error setting up client Firestore listeners:', err?.message || err);
+      }
     }
   }
 
@@ -824,7 +842,10 @@ class DataStore {
         }
 
         if (event.type === 'status_update') {
-          const { wamid, status, failureReason, eventTimestamp } = event.payload;
+          const wamid = event.payload?.wamid || event.wamid;
+          const status = event.payload?.status || event.status;
+          const failureReason = event.payload?.failureReason || event.failureReason;
+          const eventTimestamp = event.payload?.eventTimestamp || event.eventTimestamp || eventTime;
 
           // 1. Update matching message in local store for fast UI response
           // Notice: Local update only. Server webhook is authoritative writer.
@@ -876,7 +897,13 @@ class DataStore {
             }
           }
         } else if (event.type === 'incoming_message') {
-          const { wamid, fromPhone, text, profileName, timestamp, consentEvaluation, autoReplySent } = event.payload;
+          const wamid = event.payload?.wamid || event.wamid;
+          const fromPhone = event.payload?.fromPhone || event.fromPhone;
+          const text = event.payload?.text || event.text;
+          const profileName = event.payload?.profileName || event.profileName;
+          const timestamp = event.payload?.timestamp || event.timestamp || eventTime;
+          const consentEvaluation = event.payload?.consentEvaluation;
+          const autoReplySent = event.payload?.autoReplySent;
 
           if (this.messages.some((m) => m.whatsappMessageId === wamid)) {
             continue;

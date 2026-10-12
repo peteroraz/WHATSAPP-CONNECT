@@ -91,19 +91,13 @@ service cloud.firestore {
       allow read, write: if isAuthenticated();
     }
 
-    // WhatsApp Phone Routes
+    // Server-only collections: protected from direct browser access
     match /whatsapp_phone_routes/{phoneNumberId} {
-      allow read, write: if isAuthenticated();
+      allow read, write: if false;
     }
 
-    // WhatsApp Webhook Events
     match /whatsapp_webhook_events/{eventId} {
-      allow read, write: if isAuthenticated();
-    }
-
-    // Default fallback
-    match /{document=**} {
-      allow read, write: if isAuthenticated();
+      allow read, write: if false;
     }
   }
 }

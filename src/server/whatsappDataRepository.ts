@@ -1,4 +1,4 @@
-import { adminDb } from './firebaseAdmin.ts';
+import { adminDb, isProduction } from './firebaseAdmin.ts';
 
 export interface WhatsAppPhoneRoute {
   phoneNumberId: string;
@@ -57,7 +57,7 @@ function isPermissionDenied(err: any): boolean {
 }
 
 export class WhatsAppDataRepository {
-  // Resilient in-memory store ensuring high availability across environments
+  // Resilient in-memory store for development / preview mode
   private routes = new Map<string, WhatsAppPhoneRoute>();
   private webhookEvents = new Map<string, DurableWebhookEvent>();
   private contacts = new Map<string, any>();
@@ -69,16 +69,23 @@ export class WhatsAppDataRepository {
   private automationRules = new Map<string, any[]>();
 
   private adminDbAvailable = true;
-  private hasLoggedAdminNotice = false;
+  private hasLoggedDevNotice = false;
 
-  private handleAdminDbNotice(err?: any) {
+  private handleDevAdminNotice(err?: any) {
     this.adminDbAvailable = false;
-    if (!this.hasLoggedAdminNotice) {
-      this.hasLoggedAdminNotice = true;
+    if (!this.hasLoggedDevNotice) {
+      this.hasLoggedDevNotice = true;
       console.info(
-        '[WhatsAppRepo] Running in delegated sandbox mode (Firestore Admin ADC lacks direct Datastore IAM). Resilient in-memory WhatsApp repository engaged.'
+        '[WhatsAppRepo] DEVELOPMENT MEMORY FALLBACK active (local/AI Studio preview mode).'
       );
     }
+  }
+
+  private handleProductionError(operation: string, err: any): never {
+    console.error(
+      'Firebase Admin Firestore unavailable in production.\nDurable WhatsApp processing cannot continue.'
+    );
+    throw new Error(`[Production Firestore Failure] ${operation}: ${err?.message || err}`);
   }
 
   /**
@@ -90,13 +97,30 @@ export class WhatsAppDataRepository {
   async resolvePhoneRoute(phoneNumberId: string): Promise<WhatsAppPhoneRoute | null> {
     if (!phoneNumberId) return null;
 
-    // 1. Check in-memory store
+    if (isProduction) {
+      try {
+        const docRef = adminDb.collection('whatsapp_phone_routes').doc(phoneNumberId);
+        const snap = await docRef.get();
+        if (snap.exists) {
+          const data = snap.data() as WhatsAppPhoneRoute;
+          if (data.active !== false) {
+            this.routes.set(phoneNumberId, data);
+            return data;
+          }
+        }
+        console.warn(`[WhatsAppRepo] No active route found in production for phoneNumberId: ${phoneNumberId}`);
+        return null;
+      } catch (err: any) {
+        this.handleProductionError('resolvePhoneRoute', err);
+      }
+    }
+
+    // Development / preview memory mode
     const cached = this.routes.get(phoneNumberId);
     if (cached && cached.active !== false) {
       return cached;
     }
 
-    // 2. Query Firestore if Admin DB is available
     if (this.adminDbAvailable) {
       try {
         const docRef = adminDb.collection('whatsapp_phone_routes').doc(phoneNumberId);
@@ -109,11 +133,7 @@ export class WhatsAppDataRepository {
           }
         }
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note checking Firestore phone route:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
 
@@ -123,6 +143,8 @@ export class WhatsAppDataRepository {
 
   /**
    * 2. Register or update the default route for current environment WHATSAPP_PHONE_NUMBER_ID
+   * In production Cloud Run: successful ONLY after whatsapp_phone_routes/{phoneNumberId} is persisted to Firestore.
+   * Memory-only success is allowed ONLY in development/preview mode.
    */
   async registerDefaultRoute(
     organizationId: string,
@@ -145,20 +167,25 @@ export class WhatsAppDataRepository {
       updatedAt: now,
     };
 
-    // Always update local memory store first
-    this.routes.set(phoneNumberId, routeData);
+    if (isProduction) {
+      try {
+        const docRef = adminDb.collection('whatsapp_phone_routes').doc(phoneNumberId);
+        await docRef.set(routeData, { merge: true });
+        this.routes.set(phoneNumberId, routeData);
+        return { success: true, phoneNumberId };
+      } catch (err: any) {
+        this.handleProductionError('registerDefaultRoute', err);
+      }
+    }
 
-    // Attempt Firestore persistence if Admin DB is available
+    // Development / preview memory mode
+    this.routes.set(phoneNumberId, routeData);
     if (this.adminDbAvailable) {
       try {
         const docRef = adminDb.collection('whatsapp_phone_routes').doc(phoneNumberId);
         await docRef.set(routeData, { merge: true });
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note registering default route in Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
 
@@ -166,23 +193,30 @@ export class WhatsAppDataRepository {
   }
 
   /**
-   * 3. Persist durable webhook event to Firestore and memory
+   * 3. Persist durable webhook event to Firestore
    * Idempotent by deterministic ID: incoming_<wamid> or status_<wamid>_<status>
+   * In production: must successfully persist to Firestore.
    */
   async persistWebhookEvent(event: DurableWebhookEvent): Promise<void> {
-    // Save to memory
-    this.webhookEvents.set(event.id, event);
+    if (isProduction) {
+      try {
+        const docRef = adminDb.collection('whatsapp_webhook_events').doc(event.id);
+        await docRef.set(event, { merge: true });
+        this.webhookEvents.set(event.id, event);
+        return;
+      } catch (err: any) {
+        this.handleProductionError('persistWebhookEvent', err);
+      }
+    }
 
+    // Development / preview memory mode
+    this.webhookEvents.set(event.id, event);
     if (this.adminDbAvailable) {
       try {
         const docRef = adminDb.collection('whatsapp_webhook_events').doc(event.id);
         await docRef.set(event, { merge: true });
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note persisting webhook event to Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
   }
@@ -195,6 +229,29 @@ export class WhatsAppDataRepository {
     clientId?: string;
     limit?: number;
   }): Promise<DurableWebhookEvent[]> {
+    if (isProduction) {
+      try {
+        let queryRef: any = adminDb.collection('whatsapp_webhook_events');
+
+        if (params.clientId) {
+          queryRef = queryRef.where('clientId', '==', params.clientId);
+        }
+
+        if (params.since) {
+          queryRef = queryRef.where('receivedAt', '>=', params.since);
+        }
+
+        const limitCount = Math.min(params.limit || 100, 500);
+        queryRef = queryRef.orderBy('receivedAt', 'asc').limit(limitCount);
+
+        const snap = await queryRef.get();
+        return snap.docs.map((d: any) => d.data() as DurableWebhookEvent);
+      } catch (err: any) {
+        this.handleProductionError('getDurableWebhookEvents', err);
+      }
+    }
+
+    // Development / preview: check Firestore first if available, else memory
     if (this.adminDbAvailable) {
       try {
         let queryRef: any = adminDb.collection('whatsapp_webhook_events');
@@ -213,15 +270,11 @@ export class WhatsAppDataRepository {
         const snap = await queryRef.get();
         return snap.docs.map((d: any) => d.data() as DurableWebhookEvent);
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note getting indexed durable events from Firestore, using memory fallback:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
 
-    // Memory store fallback
+    // Memory store fallback for development
     let events = Array.from(this.webhookEvents.values());
     if (params.clientId) {
       events = events.filter((e) => e.clientId === params.clientId);
@@ -239,7 +292,7 @@ export class WhatsAppDataRepository {
   }
 
   /**
-   * 5. Find or create Contact using normalizedPhone
+   * 5. Find or create Contact in Firestore using normalizedPhone
    * Replaces scanning entire client contacts with indexed query:
    * organizationId ==, clientId ==, normalizedPhone ==
    */
@@ -255,9 +308,8 @@ export class WhatsAppDataRepository {
     const now = timestamp || new Date().toISOString();
     const memKey = `${organizationId}_${clientId}_${normalized}`;
 
-    if (this.adminDbAvailable) {
+    if (isProduction) {
       try {
-        // 1. Direct indexed query by normalizedPhone
         const matchSnap = await adminDb
           .collection('contacts')
           .where('organizationId', '==', organizationId)
@@ -281,7 +333,6 @@ export class WhatsAppDataRepository {
           return result;
         }
 
-        // 2. Legacy fallback for old records lacking normalizedPhone
         const legacySnap = await adminDb
           .collection('contacts')
           .where('organizationId', '==', organizationId)
@@ -308,7 +359,6 @@ export class WhatsAppDataRepository {
           }
         }
 
-        // 3. Create new Contact
         const id = `cnt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         const newContact = {
           id,
@@ -343,15 +393,75 @@ export class WhatsAppDataRepository {
         this.contacts.set(memKey, result);
         return result;
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note finding/creating contact in Firestore:', err?.message || err);
-        }
+        this.handleProductionError('findOrCreateInboundContact', err);
       }
     }
 
-    // Memory store fallback
+    // Development / preview mode
+    if (this.adminDbAvailable) {
+      try {
+        const matchSnap = await adminDb
+          .collection('contacts')
+          .where('organizationId', '==', organizationId)
+          .where('clientId', '==', clientId)
+          .where('normalizedPhone', '==', normalized)
+          .limit(1)
+          .get();
+
+        if (!matchSnap.empty) {
+          const doc = matchSnap.docs[0];
+          const data = doc.data();
+          const result = {
+            id: doc.id,
+            phone: data.phone || normalized,
+            normalizedPhone: data.normalizedPhone || normalized,
+            firstName: data.firstName || '',
+            lastName: data.lastName || '',
+            isNew: false,
+          };
+          this.contacts.set(memKey, result);
+          return result;
+        }
+
+        const id = `cnt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const newContact = {
+          id,
+          organizationId,
+          clientId,
+          firstName: profileName || 'WhatsApp',
+          lastName: profileName ? '' : 'Contact',
+          phone: normalized,
+          normalizedPhone: normalized,
+          email: '',
+          company: '',
+          tags: ['Live Inbound'],
+          groups: [],
+          whatsappOptIn: false,
+          marketingOptIn: false,
+          transactionalOptIn: false,
+          optOut: false,
+          status: 'Active',
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        await adminDb.collection('contacts').doc(id).set(newContact);
+        const result = {
+          id,
+          phone: normalized,
+          normalizedPhone: normalized,
+          firstName: newContact.firstName,
+          lastName: newContact.lastName,
+          isNew: true,
+        };
+        this.contacts.set(memKey, result);
+        return result;
+      } catch (err: any) {
+        this.handleDevAdminNotice(err);
+      }
+    }
+
+    // Memory fallback
     const cachedContact = this.contacts.get(memKey);
     if (cachedContact) {
       return { ...cachedContact, isNew: false };
@@ -371,7 +481,7 @@ export class WhatsAppDataRepository {
   }
 
   /**
-   * 6. Find or create Conversation in Firestore or memory using normalizedPhone
+   * 6. Find or create Conversation in Firestore using normalizedPhone
    */
   async findOrCreateConversation(params: {
     organizationId: string;
@@ -387,9 +497,8 @@ export class WhatsAppDataRepository {
     const cleanPhoneDigits = normalized.replace(/\D/g, '') || contactPhone.replace(/\D/g, '');
     const memKey = `${organizationId}_${clientId}_${cleanPhoneDigits}`;
 
-    if (this.adminDbAvailable) {
+    if (isProduction) {
       try {
-        // 1. Direct indexed query
         const matchSnap = await adminDb
           .collection('conversations')
           .where('organizationId', '==', organizationId)
@@ -414,32 +523,6 @@ export class WhatsAppDataRepository {
           return res;
         }
 
-        // 2. Legacy fallback
-        const legacySnap = await adminDb
-          .collection('conversations')
-          .where('organizationId', '==', organizationId)
-          .where('clientId', '==', clientId)
-          .get();
-
-        for (const doc of legacySnap.docs) {
-          const data = doc.data();
-          if (arePhoneNumbersEqual(data.contactPhone, normalized)) {
-            const nextUnread = (data.unreadCount || 0) + 1;
-            await doc.ref.update({
-              normalizedPhone: normalized,
-              lastMessage,
-              lastMessageAt,
-              lastIncomingMessageAt: lastMessageAt,
-              unreadCount: nextUnread,
-              status: 'Open',
-            });
-            const res = { id: doc.id, unreadCount: nextUnread };
-            this.conversations.set(memKey, res);
-            return res;
-          }
-        }
-
-        // 3. Create deterministic conversation
         const id = `cnv_${clientId}_${cleanPhoneDigits}`;
         const newConv = {
           id,
@@ -462,15 +545,64 @@ export class WhatsAppDataRepository {
         this.conversations.set(memKey, res);
         return res;
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note finding/creating conversation in Firestore:', err?.message || err);
-        }
+        this.handleProductionError('findOrCreateConversation', err);
       }
     }
 
-    // Memory store fallback
+    // Development / preview mode
+    if (this.adminDbAvailable) {
+      try {
+        const matchSnap = await adminDb
+          .collection('conversations')
+          .where('organizationId', '==', organizationId)
+          .where('clientId', '==', clientId)
+          .where('normalizedPhone', '==', normalized)
+          .limit(1)
+          .get();
+
+        if (!matchSnap.empty) {
+          const doc = matchSnap.docs[0];
+          const data = doc.data();
+          const nextUnread = (data.unreadCount || 0) + 1;
+          await doc.ref.update({
+            lastMessage,
+            lastMessageAt,
+            lastIncomingMessageAt: lastMessageAt,
+            unreadCount: nextUnread,
+            status: 'Open',
+          });
+          const res = { id: doc.id, unreadCount: nextUnread };
+          this.conversations.set(memKey, res);
+          return res;
+        }
+
+        const id = `cnv_${clientId}_${cleanPhoneDigits}`;
+        const newConv = {
+          id,
+          organizationId,
+          clientId,
+          contactId,
+          contactPhone: normalized || contactPhone,
+          normalizedPhone: normalized,
+          contactName: contactName || normalized || contactPhone,
+          lastMessage,
+          lastMessageAt,
+          lastIncomingMessageAt: lastMessageAt,
+          unreadCount: 1,
+          status: 'Open',
+          createdAt: lastMessageAt,
+        };
+
+        await adminDb.collection('conversations').doc(id).set(newConv, { merge: true });
+        const res = { id, unreadCount: 1 };
+        this.conversations.set(memKey, res);
+        return res;
+      } catch (err: any) {
+        this.handleDevAdminNotice(err);
+      }
+    }
+
+    // Memory fallback
     const cached = this.conversations.get(memKey);
     if (cached) {
       cached.unreadCount += 1;
@@ -488,6 +620,7 @@ export class WhatsAppDataRepository {
    * - Checks incoming_<wamid> event
    * - Finds or creates conversation and atomically increments unread
    * - Persists inbound message
+   * - Persists incoming durable event with full payload shape
    * Returns { alreadyProcessed: boolean, conversationId: string, unreadCount: number }
    */
   async processInboundMessageTransaction(params: {
@@ -500,8 +633,9 @@ export class WhatsAppDataRepository {
     contactName: string;
     text: string;
     timestamp: string;
+    profileName?: string;
   }): Promise<{ alreadyProcessed: boolean; conversationId: string; unreadCount: number }> {
-    const { wamid, organizationId, clientId, phoneNumberId, contactId, contactPhone, contactName, text, timestamp } = params;
+    const { wamid, organizationId, clientId, phoneNumberId, contactId, contactPhone, contactName, text, timestamp, profileName } = params;
     const normalized = normalizeE164(contactPhone);
     const cleanPhoneDigits = normalized.replace(/\D/g, '') || contactPhone.replace(/\D/g, '');
     const eventId = `incoming_${wamid}`;
@@ -509,17 +643,19 @@ export class WhatsAppDataRepository {
     const msgId = `msg_wamid_${sanitizedWamid}`;
     const memConvKey = `${organizationId}_${clientId}_${cleanPhoneDigits}`;
 
-    // Memory deduplication check
-    if (this.webhookEvents.has(eventId)) {
-      const existingEvt = this.webhookEvents.get(eventId)!;
-      return {
-        alreadyProcessed: true,
-        conversationId: existingEvt.payload?.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
-        unreadCount: existingEvt.payload?.unreadCount || 0,
-      };
-    }
+    // Payload adheres strictly to required minimum shape:
+    // { wamid, fromPhone, text, profileName, timestamp }
+    const eventPayload = {
+      wamid,
+      fromPhone: normalized || contactPhone,
+      text,
+      profileName: profileName || contactName || 'WhatsApp User',
+      timestamp,
+      conversationId: `cnv_${clientId}_${cleanPhoneDigits}`,
+      unreadCount: 1,
+    };
 
-    if (this.adminDbAvailable) {
+    if (isProduction) {
       try {
         const eventRef = adminDb.collection('whatsapp_webhook_events').doc(eventId);
         const msgRef = adminDb.collection('messages').doc(msgId);
@@ -535,7 +671,6 @@ export class WhatsAppDataRepository {
             };
           }
 
-          // Search for existing conversation
           const convQuery = adminDb
             .collection('conversations')
             .where('organizationId', '==', organizationId)
@@ -581,7 +716,6 @@ export class WhatsAppDataRepository {
             transaction.set(convRef, convData, { merge: true });
           }
 
-          // Inbound message document
           const msgData = {
             id: msgId,
             conversationId: convRef.id,
@@ -600,7 +734,6 @@ export class WhatsAppDataRepository {
           };
           transaction.set(msgRef, msgData, { merge: true });
 
-          // Durable event document
           const eventData: DurableWebhookEvent = {
             id: eventId,
             organizationId,
@@ -611,10 +744,9 @@ export class WhatsAppDataRepository {
             eventTimestamp: timestamp,
             receivedAt: new Date().toISOString(),
             payload: {
+              ...eventPayload,
               conversationId: convRef.id,
               unreadCount: nextUnread,
-              fromPhone: normalized || contactPhone,
-              text,
             },
           };
           transaction.set(eventRef, eventData, { merge: true });
@@ -629,15 +761,84 @@ export class WhatsAppDataRepository {
           };
         });
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note running inbound Firestore transaction:', err?.message || err);
-        }
+        this.handleProductionError('processInboundMessageTransaction', err);
       }
     }
 
-    // Memory fallback transaction simulation
+    // Development / preview mode:
+    if (this.webhookEvents.has(eventId)) {
+      const existingEvt = this.webhookEvents.get(eventId)!;
+      return {
+        alreadyProcessed: true,
+        conversationId: existingEvt.payload?.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
+        unreadCount: existingEvt.payload?.unreadCount || 0,
+      };
+    }
+
+    if (this.adminDbAvailable) {
+      try {
+        const eventRef = adminDb.collection('whatsapp_webhook_events').doc(eventId);
+        const msgRef = adminDb.collection('messages').doc(msgId);
+
+        return await adminDb.runTransaction(async (transaction) => {
+          const eventDoc = await transaction.get(eventRef);
+          if (eventDoc.exists) {
+            const evtData = eventDoc.data();
+            return {
+              alreadyProcessed: true,
+              conversationId: evtData?.payload?.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
+              unreadCount: evtData?.payload?.unreadCount || 0,
+            };
+          }
+
+          const convId = `cnv_${clientId}_${cleanPhoneDigits}`;
+          const convRef = adminDb.collection('conversations').doc(convId);
+          const nextUnread = 1;
+
+          const msgData = {
+            id: msgId,
+            conversationId: convId,
+            organizationId,
+            clientId,
+            contactId,
+            direction: 'incoming',
+            senderType: 'customer',
+            messageType: 'text',
+            body: text,
+            status: 'Delivered',
+            whatsappMessageId: wamid,
+            timestamp,
+            createdAt: timestamp,
+            isDemo: false,
+          };
+          transaction.set(msgRef, msgData, { merge: true });
+
+          const eventData: DurableWebhookEvent = {
+            id: eventId,
+            organizationId,
+            clientId,
+            phoneNumberId,
+            type: 'incoming_message',
+            wamid,
+            eventTimestamp: timestamp,
+            receivedAt: new Date().toISOString(),
+            payload: {
+              ...eventPayload,
+              conversationId: convId,
+              unreadCount: nextUnread,
+            },
+          };
+          transaction.set(eventRef, eventData, { merge: true });
+
+          this.webhookEvents.set(eventId, eventData);
+          return { alreadyProcessed: false, conversationId: convId, unreadCount: nextUnread };
+        });
+      } catch (err: any) {
+        this.handleDevAdminNotice(err);
+      }
+    }
+
+    // Memory fallback transaction
     const convId = `cnv_${clientId}_${cleanPhoneDigits}`;
     const cachedConv = this.conversations.get(memConvKey);
     const nextUnread = cachedConv ? cachedConv.unreadCount + 1 : 1;
@@ -653,10 +854,9 @@ export class WhatsAppDataRepository {
       eventTimestamp: timestamp,
       receivedAt: new Date().toISOString(),
       payload: {
+        ...eventPayload,
         conversationId: convId,
         unreadCount: nextUnread,
-        fromPhone: normalized || contactPhone,
-        text,
       },
     };
     this.webhookEvents.set(eventId, eventData);
@@ -727,8 +927,29 @@ export class WhatsAppDataRepository {
       isDemo: false,
     };
 
-    this.messages.set(msgId, msgData);
+    if (isProduction) {
+      try {
+        await adminDb.collection('messages').doc(msgId).set(msgData, { merge: true });
 
+        if (params.conversationId) {
+          await adminDb.collection('conversations').doc(params.conversationId).set(
+            {
+              lastMessage: params.text,
+              lastMessageAt: now,
+              lastOutgoingMessageAt: now,
+            },
+            { merge: true }
+          );
+        }
+        this.messages.set(msgId, msgData);
+        return msgId;
+      } catch (err: any) {
+        this.handleProductionError('persistOutgoingMessage', err);
+      }
+    }
+
+    // Development / preview mode
+    this.messages.set(msgId, msgData);
     if (this.adminDbAvailable) {
       try {
         await adminDb.collection('messages').doc(msgId).set(msgData, { merge: true });
@@ -744,11 +965,7 @@ export class WhatsAppDataRepository {
           );
         }
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note persisting outgoing message to Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
 
@@ -768,7 +985,35 @@ export class WhatsAppDataRepository {
       rawStatus === 'read' ? 'Read' : rawStatus === 'delivered' ? 'Delivered' : rawStatus === 'failed' ? 'Failed' : 'Sent';
     const newRank = STATUS_RANK[mappedStatus] || 0;
 
-    // Update in memory messages
+    if (isProduction) {
+      try {
+        const snap = await adminDb.collection('messages').where('whatsappMessageId', '==', wamid).get();
+        if (!snap.empty) {
+          for (const doc of snap.docs) {
+            const currentData = doc.data();
+            const currentRank = STATUS_RANK[currentData.status] || 0;
+
+            if (mappedStatus === 'Failed' || newRank >= currentRank) {
+              const updatePayload: Record<string, any> = {
+                status: mappedStatus,
+                updatedAt: eventTimestamp,
+              };
+              if (failureReason) updatePayload.failureReason = failureReason;
+              if (rawStatus === 'delivered') updatePayload.deliveredAt = eventTimestamp;
+              if (rawStatus === 'read') updatePayload.readAt = eventTimestamp;
+              if (rawStatus === 'failed') updatePayload.failedAt = eventTimestamp;
+
+              await doc.ref.update(updatePayload);
+            }
+          }
+        }
+        return true;
+      } catch (err: any) {
+        this.handleProductionError('updateMessageDeliveryStatus', err);
+      }
+    }
+
+    // Development / preview mode
     for (const [id, msg] of this.messages.entries()) {
       if (msg.whatsappMessageId === wamid) {
         const curRank = STATUS_RANK[msg.status] || 0;
@@ -806,13 +1051,8 @@ export class WhatsAppDataRepository {
             }
           }
         }
-        return true;
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note updating message delivery status in Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
 
@@ -828,7 +1068,41 @@ export class WhatsAppDataRepository {
     eventTimestamp: string,
     failureReason?: string
   ): Promise<boolean> {
-    // Update memory
+    if (isProduction) {
+      try {
+        const snap = await adminDb.collection('campaign_recipients').where('whatsappMessageId', '==', wamid).get();
+        if (!snap.empty) {
+          for (const doc of snap.docs) {
+            const currentData = doc.data();
+            if (currentData.status === 'read' && rawStatus !== 'read' && rawStatus !== 'failed') {
+              continue;
+            }
+
+            const updatePayload: Record<string, any> = {
+              status: rawStatus,
+              updatedAt: eventTimestamp,
+            };
+            if (rawStatus === 'delivered') updatePayload.deliveredAt = eventTimestamp;
+            if (rawStatus === 'read') updatePayload.readAt = eventTimestamp;
+            if (rawStatus === 'failed') {
+              updatePayload.failedAt = eventTimestamp;
+              if (failureReason) updatePayload.failureReason = failureReason;
+            }
+
+            await doc.ref.update(updatePayload);
+
+            if (currentData.campaignId) {
+              await this.updateCampaignAggregates(currentData.campaignId);
+            }
+          }
+        }
+        return true;
+      } catch (err: any) {
+        this.handleProductionError('updateCampaignRecipientStatus', err);
+      }
+    }
+
+    // Development / preview mode
     for (const [id, rec] of this.campaignRecipients.entries()) {
       if (rec.whatsappMessageId === wamid) {
         if (rec.status === 'read' && rawStatus !== 'read' && rawStatus !== 'failed') continue;
@@ -872,13 +1146,8 @@ export class WhatsAppDataRepository {
             }
           }
         }
-        return true;
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note updating campaign recipient status in Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
 
@@ -889,6 +1158,38 @@ export class WhatsAppDataRepository {
    * 11. Recalculate Campaign Aggregates from Persisted Recipients
    */
   async updateCampaignAggregates(campaignId: string): Promise<void> {
+    if (isProduction) {
+      try {
+        const recsSnap = await adminDb
+          .collection('campaign_recipients')
+          .where('campaignId', '==', campaignId)
+          .get();
+
+        if (!recsSnap.empty) {
+          const recs = recsSnap.docs.map((d) => d.data());
+          const sentCount = recs.filter((r) => r.status === 'sent' || r.status === 'delivered' || r.status === 'read').length;
+          const deliveredCount = recs.filter((r) => r.status === 'delivered' || r.status === 'read').length;
+          const readCount = recs.filter((r) => r.status === 'read').length;
+          const failedCount = recs.filter((r) => r.status === 'failed').length;
+
+          await adminDb.collection('campaigns').doc(campaignId).set(
+            {
+              sentCount,
+              deliveredCount,
+              readCount,
+              failedCount,
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        }
+        return;
+      } catch (err: any) {
+        this.handleProductionError('updateCampaignAggregates', err);
+      }
+    }
+
+    // Development / preview mode
     if (this.adminDbAvailable) {
       try {
         const recsSnap = await adminDb
@@ -915,11 +1216,7 @@ export class WhatsAppDataRepository {
           );
         }
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note updating campaign aggregates in Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
   }
@@ -928,6 +1225,22 @@ export class WhatsAppDataRepository {
    * 12. Retrieve Active Automation Rules for resolved Org & Client
    */
   async getAutomationRules(organizationId: string, clientId: string): Promise<any[]> {
+    if (isProduction) {
+      try {
+        const snap = await adminDb
+          .collection('automation_rules')
+          .where('organizationId', '==', organizationId)
+          .where('clientId', '==', clientId)
+          .get();
+
+        return snap.docs
+          .map((d) => d.data())
+          .filter((r) => r.active !== false && (r.status === 'active' || r.status === 'Active' || !r.status));
+      } catch (err: any) {
+        this.handleProductionError('getAutomationRules', err);
+      }
+    }
+
     if (this.adminDbAvailable) {
       try {
         const snap = await adminDb
@@ -940,11 +1253,7 @@ export class WhatsAppDataRepository {
           .map((d) => d.data())
           .filter((r) => r.active !== false && (r.status === 'active' || r.status === 'Active' || !r.status));
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note fetching automation rules from Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
 
@@ -976,6 +1285,52 @@ export class WhatsAppDataRepository {
     const normalized = normalizeE164(params.phone);
     this.optOuts.set(normalized, true);
 
+    const consentId = params.wamid
+      ? `opt_out_${params.wamid.replace(/[^a-zA-Z0-9]/g, '_')}`
+      : `opt_out_${params.contactId}_${params.optOutDate.substring(0, 10)}`;
+
+    if (isProduction) {
+      try {
+        const contactRef = adminDb.collection('contacts').doc(params.contactId);
+        await contactRef.set(
+          {
+            optOut: true,
+            marketingOptIn: false,
+            transactionalOptIn: false,
+            status: 'Opted Out',
+            optOutDate: params.optOutDate,
+            optOutSource: params.source,
+            updatedAt: params.optOutDate,
+          },
+          { merge: true }
+        );
+
+        const consentRef = adminDb.collection('opt_in_history').doc(consentId);
+        await consentRef.set(
+          {
+            id: consentId,
+            organizationId: params.organizationId,
+            clientId: params.clientId,
+            contactId: params.contactId,
+            phone: params.phone,
+            previousStatus: 'Active',
+            newStatus: 'Opted Out',
+            source: params.source,
+            sourceWamid: params.wamid || '',
+            changedByUserId: 'whatsapp_server',
+            timestamp: params.optOutDate,
+            notes: params.notes || 'Inbound WhatsApp STOP Command',
+            event: 'opt_out',
+          },
+          { merge: true }
+        );
+        return;
+      } catch (err: any) {
+        this.handleProductionError('updateContactOptOut', err);
+      }
+    }
+
+    // Development / preview mode
     if (this.adminDbAvailable) {
       try {
         const contactRef = adminDb.collection('contacts').doc(params.contactId);
@@ -992,11 +1347,7 @@ export class WhatsAppDataRepository {
           { merge: true }
         );
 
-        const consentId = params.wamid
-          ? `opt_out_${params.wamid.replace(/[^a-zA-Z0-9]/g, '_')}`
-          : `opt_out_${params.contactId}_${params.optOutDate.substring(0, 10)}`;
         const consentRef = adminDb.collection('opt_in_history').doc(consentId);
-
         await consentRef.set(
           {
             id: consentId,
@@ -1016,11 +1367,7 @@ export class WhatsAppDataRepository {
           { merge: true }
         );
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note updating contact opt-out in Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
   }
@@ -1040,6 +1387,51 @@ export class WhatsAppDataRepository {
     const normalized = normalizeE164(params.phone);
     this.optOuts.set(normalized, false);
 
+    const consentId = params.wamid
+      ? `opt_in_${params.wamid.replace(/[^a-zA-Z0-9]/g, '_')}`
+      : `opt_in_${params.contactId}_${params.timestamp.substring(0, 10)}`;
+
+    if (isProduction) {
+      try {
+        const contactRef = adminDb.collection('contacts').doc(params.contactId);
+        await contactRef.set(
+          {
+            optOut: false,
+            marketingOptIn: true,
+            status: 'Active',
+            optInDate: params.timestamp,
+            optInSource: params.source,
+            updatedAt: params.timestamp,
+          },
+          { merge: true }
+        );
+
+        const consentRef = adminDb.collection('opt_in_history').doc(consentId);
+        await consentRef.set(
+          {
+            id: consentId,
+            organizationId: params.organizationId,
+            clientId: params.clientId,
+            contactId: params.contactId,
+            phone: params.phone,
+            previousStatus: 'Opted Out',
+            newStatus: 'Marketing Consented',
+            source: params.source,
+            sourceWamid: params.wamid || '',
+            changedByUserId: 'whatsapp_server',
+            timestamp: params.timestamp,
+            notes: 'Inbound WhatsApp START Command',
+            event: 'opt_in',
+          },
+          { merge: true }
+        );
+        return;
+      } catch (err: any) {
+        this.handleProductionError('updateContactOptIn', err);
+      }
+    }
+
+    // Development / preview mode
     if (this.adminDbAvailable) {
       try {
         const contactRef = adminDb.collection('contacts').doc(params.contactId);
@@ -1055,11 +1447,7 @@ export class WhatsAppDataRepository {
           { merge: true }
         );
 
-        const consentId = params.wamid
-          ? `opt_in_${params.wamid.replace(/[^a-zA-Z0-9]/g, '_')}`
-          : `opt_in_${params.contactId}_${params.timestamp.substring(0, 10)}`;
         const consentRef = adminDb.collection('opt_in_history').doc(consentId);
-
         await consentRef.set(
           {
             id: consentId,
@@ -1079,11 +1467,7 @@ export class WhatsAppDataRepository {
           { merge: true }
         );
       } catch (err: any) {
-        if (isPermissionDenied(err)) {
-          this.handleAdminDbNotice(err);
-        } else {
-          console.warn('[WhatsAppRepo] Note updating contact opt-in in Firestore:', err?.message || err);
-        }
+        this.handleDevAdminNotice(err);
       }
     }
   }
