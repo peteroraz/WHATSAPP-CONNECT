@@ -308,6 +308,30 @@ class DataStore {
     return `http://localhost:${port}${endpoint}`;
   }
 
+  public async getAuthHeaders(): Promise<Record<string, string>> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (this.orgId) {
+      headers['x-organization-id'] = this.orgId;
+    }
+    if (auth.currentUser) {
+      try {
+        const token = await auth.currentUser.getIdToken();
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+          return headers;
+        }
+      } catch (e) {
+        console.warn('[DataStore] Error obtaining Firebase auth token:', e);
+      }
+    }
+    // Local / Demo mode fallback
+    headers['Authorization'] = 'Bearer demo';
+    headers['x-demo-mode'] = 'true';
+    return headers;
+  }
+
   private saveLocal() {
     try {
       localStorage.setItem(this.getStorageKey('clients'), JSON.stringify(this.clients));
@@ -584,12 +608,13 @@ class DataStore {
     // Start background webhook event polling and rules synchronization
     this.startEventPolling();
     this.syncAutomationRulesToServer();
-    this.checkServerWhatsAppStatus().then(() => {
+    this.checkServerWhatsAppStatus().then(async () => {
       // Once organization is known, default client exists, and server WhatsApp is connected, register default route idempotently
       if (this.serverWhatsAppStatus === 'Connected') {
+        const headers = await this.getAuthHeaders();
         fetch(this.getApiUrl('/api/whatsapp/register-default-route'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             organizationId,
             clientId: effectiveDefaultClientId,
@@ -634,14 +659,16 @@ class DataStore {
 
         // Idempotently ensure default route registration when connected
         if (isConnected && this.orgId) {
-          fetch(this.getApiUrl('/api/whatsapp/register-default-route'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              organizationId: this.orgId,
-              clientId: defaultClientId,
-            }),
-          }).catch(() => {});
+          this.getAuthHeaders().then((headers) => {
+            fetch(this.getApiUrl('/api/whatsapp/register-default-route'), {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                organizationId: this.orgId,
+                clientId: defaultClientId,
+              }),
+            }).catch(() => {});
+          });
         }
 
         this.notify();
@@ -818,7 +845,8 @@ class DataStore {
       if (activeClient) params.append('clientId', activeClient);
 
       const queryString = params.toString() ? `?${params.toString()}` : '';
-      const res = await fetch(this.getApiUrl(`/api/whatsapp/events${queryString}`));
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(this.getApiUrl(`/api/whatsapp/events${queryString}`), { headers });
       if (!res.ok) return;
       const data = await res.json();
       if (!data.success || !Array.isArray(data.events) || data.events.length === 0) return;
@@ -1030,9 +1058,10 @@ class DataStore {
     try {
       const defaultClientId = this.getDefaultWhatsAppClientId();
       const rulesToSync = this.automationRules.filter((r) => r.clientId === defaultClientId);
+      const headers = await this.getAuthHeaders();
       await fetch('/api/whatsapp/sync-rules', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           rules: rulesToSync,
           organizationId: this.orgId,
@@ -1044,7 +1073,8 @@ class DataStore {
 
   async syncTemplatesFromMeta(): Promise<{ success: boolean; count: number; error?: string }> {
     try {
-      const res = await fetch('/api/whatsapp/sync-templates');
+      const headers = await this.getAuthHeaders();
+      const res = await fetch('/api/whatsapp/sync-templates', { headers });
       const data = await res.json();
       if (!res.ok || !data.success) {
         return { success: false, count: 0, error: data.error || 'Failed to fetch templates from Meta' };
@@ -1717,9 +1747,10 @@ class DataStore {
         );
       }
 
+      const headers = await this.getAuthHeaders();
       const res = await fetch(this.getApiUrl('/api/whatsapp/send-broadcast'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           campaignName: data.name,
           template,
@@ -2042,9 +2073,10 @@ class DataStore {
 
     if (isLiveMode) {
       // LIVE MODE: Call Meta WhatsApp Cloud API via server endpoint. Do NOT create message locally until Meta returns success and real wamid
+      const headers = await this.getAuthHeaders();
       const response = await fetch(this.getApiUrl('/api/whatsapp/send-message'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           to: cleanPhone,
           messageType: 'text',
@@ -2195,10 +2227,10 @@ class DataStore {
     const clientId = conv.clientId || this.requireActiveClientId();
 
     if (isLiveMode) {
-      // LIVE MODE: Call server WhatsApp service. Do not create fake local message beforehand.
+      const headers = await this.getAuthHeaders();
       const response = await fetch(this.getApiUrl('/api/whatsapp/send-message'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           to: cleanPhone,
           messageType: 'template',
@@ -2299,9 +2331,10 @@ class DataStore {
       throw new Error('Recipient phone number is required and must contain digits.');
     }
 
+    const headers = await this.getAuthHeaders();
     const res = await fetch('/api/whatsapp/test-send-hello-world', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ recipientPhone: normRecipient }),
     });
 
@@ -2485,9 +2518,10 @@ class DataStore {
 
     // 4. Call server simulator endpoint to evaluate opt-out & automations (scoped to active client's rules)
     try {
+      const headers = await this.getAuthHeaders();
       const response = await fetch('/api/webhook/simulate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           fromPhone: cleanPhone,
           text,

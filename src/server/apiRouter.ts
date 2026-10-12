@@ -7,6 +7,7 @@ import { evaluateAutomationRules } from './automationRunner.ts';
 import type { AutomationRule } from '../types/index.ts';
 import { normalizePhoneNumber } from '../utils/phoneUtils.ts';
 import { isProduction } from './firebaseAdmin.ts';
+import { authenticateFirebaseUser, requireRole } from './authMiddleware.ts';
 
 export const apiRouter: Router = express.Router();
 
@@ -126,21 +127,26 @@ apiRouter.post('/webhook', handleWebhookPost);
  * Maps current WHATSAPP_PHONE_NUMBER_ID to tenant organizationId and defaultClientId.
  * Does not accept phoneNumberId from browser.
  */
-apiRouter.post('/whatsapp/register-default-route', async (req: Request, res: Response) => {
-  try {
-    const { organizationId, clientId } = req.body;
-    if (!organizationId || !clientId) {
-      return res.status(400).json({ error: 'organizationId and clientId are required' });
+apiRouter.post(
+  '/whatsapp/register-default-route',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin']),
+  async (req: Request, res: Response) => {
+    try {
+      const { organizationId, clientId } = req.body;
+      if (!organizationId || !clientId) {
+        return res.status(400).json({ error: 'organizationId and clientId are required' });
+      }
+      const result = await whatsappDataRepository.registerDefaultRoute(organizationId, clientId);
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Failed to register default route' });
     }
-    const result = await whatsappDataRepository.registerDefaultRoute(organizationId, clientId);
-    if (!result.success) {
-      return res.status(400).json({ error: result.error });
-    }
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Failed to register default route' });
   }
-});
+);
 
 /**
  * TEST CONNECTION (POST /api/whatsapp/test-connection)
@@ -148,19 +154,24 @@ apiRouter.post('/whatsapp/register-default-route', async (req: Request, res: Res
  * Never returns access token or App Secret.
  * Handles missing credentials gracefully without throwing.
  */
-apiRouter.post('/whatsapp/test-connection', async (_req: Request, res: Response) => {
-  try {
-    const result = await whatsappService.testConnection();
-    return res.json(result);
-  } catch (error: any) {
-    return res.status(500).json({
-      configured: false,
-      status: 'Connection Error',
-      connected: false,
-      error: error?.message || 'Failed to verify WhatsApp credentials safely',
-    });
+apiRouter.post(
+  '/whatsapp/test-connection',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin', 'agent']),
+  async (_req: Request, res: Response) => {
+    try {
+      const result = await whatsappService.testConnection();
+      return res.json(result);
+    } catch (error: any) {
+      return res.status(500).json({
+        configured: false,
+        status: 'Connection Error',
+        connected: false,
+        error: error?.message || 'Failed to verify WhatsApp credentials safely',
+      });
+    }
   }
-});
+);
 
 /**
  * GET/SYNC TEMPLATES (GET/POST /api/whatsapp/sync-templates)
@@ -179,28 +190,33 @@ const handleSyncTemplates = async (_req: Request, res: Response) => {
   }
 };
 
-apiRouter.get('/whatsapp/sync-templates', handleSyncTemplates);
-apiRouter.post('/whatsapp/sync-templates', handleSyncTemplates);
-apiRouter.get('/whatsapp/templates', handleSyncTemplates);
+apiRouter.get('/whatsapp/sync-templates', authenticateFirebaseUser, requireRole(['owner', 'admin', 'agent']), handleSyncTemplates);
+apiRouter.post('/whatsapp/sync-templates', authenticateFirebaseUser, requireRole(['owner', 'admin', 'agent']), handleSyncTemplates);
+apiRouter.get('/whatsapp/templates', authenticateFirebaseUser, requireRole(['owner', 'admin', 'agent']), handleSyncTemplates);
 
 /**
  * SYNC AUTOMATION RULES (POST /api/whatsapp/sync-rules)
  * Updates server cached automation rules for incoming webhook evaluation.
  */
-apiRouter.post('/whatsapp/sync-rules', (req: Request, res: Response) => {
-  try {
-    const { rules, organizationId, clientId } = req.body;
-    if (Array.isArray(rules)) {
-      whatsappService.updateAutomationRulesCache(rules);
-      if (organizationId && clientId) {
-        whatsappDataRepository.updateAutomationRulesCache(organizationId, clientId, rules);
+apiRouter.post(
+  '/whatsapp/sync-rules',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin']),
+  (req: Request, res: Response) => {
+    try {
+      const { rules, organizationId, clientId } = req.body;
+      if (Array.isArray(rules)) {
+        whatsappService.updateAutomationRulesCache(rules);
+        if (organizationId && clientId) {
+          whatsappDataRepository.updateAutomationRulesCache(organizationId, clientId, rules);
+        }
       }
+      return res.json({ success: true, count: Array.isArray(rules) ? rules.length : 0 });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message });
     }
-    return res.json({ success: true, count: Array.isArray(rules) ? rules.length : 0 });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message });
   }
-});
+);
 
 /**
  * GET WEBHOOK EVENTS (GET /api/whatsapp/events via /whatsapp/events mount)
@@ -234,7 +250,7 @@ const handleGetEvents = async (req: Request, res: Response) => {
   }
 };
 
-apiRouter.get('/whatsapp/events', handleGetEvents);
+apiRouter.get('/whatsapp/events', authenticateFirebaseUser, requireRole(['owner', 'admin', 'agent']), handleGetEvents);
 
 /**
  * DIAGNOSTIC OUTBOUND TEST (POST /api/whatsapp/test-send-hello-world)
@@ -251,83 +267,93 @@ apiRouter.get('/whatsapp/events', handleGetEvents);
  * - Meta error message
  * - fbtrace_id if supplied
  */
-apiRouter.post('/whatsapp/test-send-hello-world', async (req: Request, res: Response) => {
-  try {
-    const { recipientPhone } = req.body;
-    if (!recipientPhone) {
-      return res.status(400).json({
+apiRouter.post(
+  '/whatsapp/test-send-hello-world',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin']),
+  async (req: Request, res: Response) => {
+    try {
+      const { recipientPhone } = req.body;
+      if (!recipientPhone) {
+        return res.status(400).json({
+          success: false,
+          httpStatus: 400,
+          errorMessage: 'Recipient phone number is required.',
+        });
+      }
+
+      const result = await whatsappService.sendHelloWorldTest(recipientPhone);
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({
         success: false,
-        httpStatus: 400,
-        errorMessage: 'Recipient phone number is required.',
+        httpStatus: 500,
+        errorMessage: err?.message || 'Server error processing hello_world diagnostic send',
       });
     }
-
-    const result = await whatsappService.sendHelloWorldTest(recipientPhone);
-    return res.json(result);
-  } catch (err: any) {
-    return res.status(500).json({
-      success: false,
-      httpStatus: 500,
-      errorMessage: err?.message || 'Server error processing hello_world diagnostic send',
-    });
   }
-});
+);
 
 /**
  * DISPATCH LIVE OR DEMO MESSAGE (POST /api/whatsapp/send-message)
  * Live text messaging enforces 24h customer window. Outside window requires template.
  */
-apiRouter.post('/whatsapp/send-message', async (req: Request, res: Response) => {
-  try {
-    const { to, messageType, body, templateName, languageCode, components, outsideCustomerWindow } = req.body;
+apiRouter.post(
+  '/whatsapp/send-message',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin', 'agent']),
+  async (req: Request, res: Response) => {
+    try {
+      const { to, messageType, body, templateName, languageCode, components, outsideCustomerWindow } = req.body;
 
-    if (!to) {
-      return res.status(400).json({ error: 'Recipient phone number is required' });
-    }
-
-    // Normalize recipient phone: remove +, spaces, dashes, punctuation
-    const normalizedTo = String(to).replace(/\D/g, '');
-    if (!normalizedTo) {
-      return res.status(400).json({ error: 'Recipient phone number contains no valid digits' });
-    }
-
-    const { configured } = whatsappService.getCredentials();
-
-    // In Live Mode: Enforce 24-hour customer window for free-form text messages
-    if (configured && messageType === 'text' && outsideCustomerWindow) {
-      return res.status(400).json({
-        success: false,
-        error:
-          'Outside 24-hour customer service window: Meta WhatsApp Business Cloud API requires an approved template message to contact customers after 24 hours of inactivity.',
-      });
-    }
-
-    if (messageType === 'template') {
-      if (!templateName) {
-        return res.status(400).json({ error: 'Template name is required for template messages' });
+      if (!to) {
+        return res.status(400).json({ error: 'Recipient phone number is required' });
       }
-      const result = await whatsappService.sendTemplateMessage({
-        to: normalizedTo,
-        templateName,
-        languageCode: languageCode || 'en_US',
-        components,
-      });
+
+      // Normalize recipient phone: remove +, spaces, dashes, punctuation
+      const normalizedTo = String(to).replace(/\D/g, '');
+      if (!normalizedTo) {
+        return res.status(400).json({ error: 'Recipient phone number contains no valid digits' });
+      }
+
+      const { configured } = whatsappService.getCredentials();
+
+      // In Live Mode: Enforce 24-hour customer window for free-form text messages
+      if (configured && messageType === 'text' && outsideCustomerWindow) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Outside 24-hour customer service window: Meta WhatsApp Business Cloud API requires an approved template message to contact customers after 24 hours of inactivity.',
+        });
+      }
+
+      if (messageType === 'template') {
+        if (!templateName) {
+          return res.status(400).json({ error: 'Template name is required for template messages' });
+        }
+        const result = await whatsappService.sendTemplateMessage({
+          to: normalizedTo,
+          templateName,
+          languageCode: languageCode || 'en_US',
+          components,
+        });
+        return res.json(result);
+      }
+
+      if (!body || !body.trim()) {
+        return res.status(400).json({ error: 'Message body cannot be empty' });
+      }
+
+      const result = await whatsappService.sendTextMessage({ to: normalizedTo, body: body.trim() });
       return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || 'Server error dispatching WhatsApp message',
+      });
     }
-
-    if (!body || !body.trim()) {
-      return res.status(400).json({ error: 'Message body cannot be empty' });
-    }
-
-    const result = await whatsappService.sendTextMessage({ to: normalizedTo, body: body.trim() });
-    return res.json(result);
-  } catch (err: any) {
-    return res.status(500).json({
-      success: false,
-      error: err?.message || 'Server error dispatching WhatsApp message',
-    });
   }
-});
+);
 
 /**
  * SERVER-SIDE BROADCAST PROCESSOR (POST /api/whatsapp/send-broadcast)
@@ -341,7 +367,11 @@ apiRouter.post('/whatsapp/send-message', async (req: Request, res: Response) => 
  *  - Saves returned Meta wamid
  *  - Initial status is 'sent', not delivered or read
  */
-apiRouter.post('/whatsapp/send-broadcast', async (req: Request, res: Response) => {
+apiRouter.post(
+  '/whatsapp/send-broadcast',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin']),
+  async (req: Request, res: Response) => {
   try {
     const { campaignName, template, recipients, variableMapping, variableFallbacks, isLiveMode } = req.body;
 
@@ -548,7 +578,11 @@ apiRouter.post('/whatsapp/send-broadcast', async (req: Request, res: Response) =
  * INBOUND SIMULATOR (POST /api/webhook/simulate)
  * Preserves development/demo test sandbox functionality.
  */
-apiRouter.post('/webhook/simulate', (req: Request, res: Response) => {
+apiRouter.post(
+  '/webhook/simulate',
+  authenticateFirebaseUser,
+  requireRole(['owner', 'admin', 'agent']),
+  (req: Request, res: Response) => {
   try {
     const { fromPhone, text, rules, isFirstMessage, businessHours } = req.body;
 

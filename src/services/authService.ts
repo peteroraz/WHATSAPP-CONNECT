@@ -15,7 +15,10 @@ import {
   doc, 
   getDoc, 
   setDoc, 
-  updateDoc, 
+  collection,
+  query,
+  where,
+  getDocs,
   serverTimestamp 
 } from 'firebase/firestore';
 import { UserProfile, Organization, OrganizationMembership } from '../types/index.ts';
@@ -58,8 +61,9 @@ export const authService = {
       createdAt: new Date().toISOString(),
     };
 
+    const canonicalMembershipId = `${orgId}_${userId}`;
     const membership: OrganizationMembership = {
-      id: `mem_${Date.now()}`,
+      id: canonicalMembershipId,
       organizationId: orgId,
       userId,
       role: 'owner',
@@ -73,45 +77,114 @@ export const authService = {
 
   /**
    * Ensure user document and organization exist in Firestore
+   * Supports custom orgName for new signups and enforces canonical organization membership.
    */
-  async syncUserAndOrg(fbUser: FirebaseUser): Promise<{ user: UserProfile; organization: Organization; membership: OrganizationMembership }> {
+  async syncUserAndOrg(
+    fbUser: FirebaseUser,
+    orgName?: string
+  ): Promise<{ user: UserProfile; organization: Organization; membership: OrganizationMembership }> {
     try {
       const userRef = doc(db, 'users', fbUser.uid);
       const userSnap = await getDoc(userRef);
 
       if (userSnap.exists()) {
         const userData = userSnap.data() as UserProfile;
-        // Fetch org
-        let orgData: Organization;
-        const orgRef = doc(db, 'organizations', userData.currentOrgId);
+        const orgId = userData.currentOrgId;
+
+        // Fetch organization document
+        const orgRef = doc(db, 'organizations', orgId);
         const orgSnap = await getDoc(orgRef);
 
-        if (orgSnap.exists()) {
-          orgData = { id: orgSnap.id, ...orgSnap.data() } as Organization;
-        } else {
-          const { org } = this.createDemoOrg(fbUser.uid, fbUser.email || '', fbUser.displayName || 'Business Owner');
-          await setDoc(orgRef, org);
-          orgData = org;
+        if (!orgSnap.exists()) {
+          throw new Error(`Organization ${orgId} not found.`);
         }
 
-        const membership: OrganizationMembership = {
-          id: `mem_${fbUser.uid}`,
-          organizationId: orgData.id,
-          userId: fbUser.uid,
-          role: 'owner',
-          userEmail: fbUser.email || '',
-          userName: fbUser.displayName || 'Admin',
+        const orgData = { id: orgSnap.id, ...orgSnap.data() } as Organization;
+        const canonicalId = `${orgId}_${fbUser.uid}`;
+        const memRef = doc(db, 'organization_memberships', canonicalId);
+        const memSnap = await getDoc(memRef);
+
+        // 1. If canonical membership exists, return its actual stored role
+        if (memSnap.exists()) {
+          const membership = { id: memSnap.id, ...memSnap.data() } as OrganizationMembership;
+          return { user: userData, organization: orgData, membership };
+        }
+
+        // 2. Legacy membership migration: check for legacy mem_* docs
+        const legacyQuery = query(
+          collection(db, 'organization_memberships'),
+          where('organizationId', '==', orgId),
+          where('userId', '==', fbUser.uid)
+        );
+        const legacySnap = await getDocs(legacyQuery);
+
+        if (!legacySnap.empty) {
+          const legacyDoc = legacySnap.docs[0];
+          const legacyData = legacyDoc.data() as OrganizationMembership;
+          const canonicalMembership: OrganizationMembership = {
+            ...legacyData,
+            id: canonicalId,
+            organizationId: orgId,
+            userId: fbUser.uid,
+            role: legacyData.role,
+          };
+          await setDoc(memRef, canonicalMembership);
+          return { user: userData, organization: orgData, membership: canonicalMembership };
+        }
+
+        // 3. If user is the registered organization owner, create canonical owner membership
+        if (orgData.ownerId === fbUser.uid) {
+          const ownerMembership: OrganizationMembership = {
+            id: canonicalId,
+            organizationId: orgId,
+            userId: fbUser.uid,
+            role: 'owner',
+            userEmail: fbUser.email || '',
+            userName: fbUser.displayName || userData.displayName || 'Owner',
+            createdAt: new Date().toISOString(),
+          };
+          await setDoc(memRef, ownerMembership);
+          return { user: userData, organization: orgData, membership: ownerMembership };
+        }
+
+        // 4. User does not belong to the organization - do not silently promote
+        throw new Error(`Authorization error: User ${fbUser.uid} does not belong to organization ${orgId}.`);
+      } else {
+        // First time signup
+        const orgId = `org_${Date.now()}`;
+        const assignedOrgName = orgName?.trim() || (fbUser.displayName ? `${fbUser.displayName}'s Organization` : 'My Organization');
+
+        const org: Organization = {
+          id: orgId,
+          name: assignedOrgName,
+          ownerId: fbUser.uid,
+          timezone: 'UTC',
+          whatsappConnected: false,
+          whatsappBusinessAccountId: '',
+          whatsappPhoneNumberId: '',
+          whatsappPhoneNumber: '',
+          whatsappApiVersion: 'v21.0',
+          businessHours: {
+            enabled: true,
+            timezone: 'UTC',
+            days: [1, 2, 3, 4, 5],
+            startTime: '08:00',
+            endTime: '17:00',
+            outOfHoursMessage: 'Thank you for contacting us. Our office is currently closed. Our business hours are Monday to Friday, 8:00 AM to 5:00 PM. We will respond as soon as we reopen.',
+          },
           createdAt: new Date().toISOString(),
         };
 
-        return { user: userData, organization: orgData, membership };
-      } else {
-        // First time signup
-        const { org, membership } = this.createDemoOrg(
-          fbUser.uid, 
-          fbUser.email || 'user@example.com', 
-          fbUser.displayName || 'Account Owner'
-        );
+        const canonicalMembershipId = `${orgId}_${fbUser.uid}`;
+        const membership: OrganizationMembership = {
+          id: canonicalMembershipId,
+          organizationId: orgId,
+          userId: fbUser.uid,
+          role: 'owner',
+          userEmail: fbUser.email || '',
+          userName: fbUser.displayName || fbUser.email?.split('@')[0] || 'Account Owner',
+          createdAt: new Date().toISOString(),
+        };
 
         const newUser: UserProfile = {
           id: fbUser.uid,
@@ -122,31 +195,61 @@ export const authService = {
           createdAt: new Date().toISOString(),
         };
 
-        // Write to Firestore
+        // Write all entities to Firestore
         await setDoc(userRef, { ...newUser, createdAt: serverTimestamp() });
         await setDoc(doc(db, 'organizations', org.id), org);
-        await setDoc(doc(db, 'organization_memberships', membership.id), membership);
+        await setDoc(doc(db, 'organization_memberships', canonicalMembershipId), membership);
 
         return { user: newUser, organization: org, membership };
       }
     } catch (err: any) {
+      if (err?.message?.includes('Authorization error') || err?.message?.includes('does not belong to organization')) {
+        throw err;
+      }
       if (err?.code === 'permission-denied') {
         handleFirestoreError(err, OperationType.GET, `users/${fbUser.uid}`);
       }
       console.warn('Firestore user sync fallback (using local cache):', err);
-      const { org, membership } = this.createDemoOrg(
-        fbUser.uid, 
-        fbUser.email || 'user@whatsflow.io', 
-        fbUser.displayName || 'Owner'
-      );
+      const fallbackOrgId = `org_${Date.now()}`;
+      const fallbackOrgName = orgName?.trim() || 'My Organization';
+      const fallbackOrg: Organization = {
+        id: fallbackOrgId,
+        name: fallbackOrgName,
+        ownerId: fbUser.uid,
+        timezone: 'UTC',
+        whatsappConnected: false,
+        whatsappBusinessAccountId: '',
+        whatsappPhoneNumberId: '',
+        whatsappPhoneNumber: '',
+        whatsappApiVersion: 'v21.0',
+        businessHours: {
+          enabled: true,
+          timezone: 'UTC',
+          days: [1, 2, 3, 4, 5],
+          startTime: '08:00',
+          endTime: '17:00',
+          outOfHoursMessage: 'Office closed.',
+        },
+        createdAt: new Date().toISOString(),
+      };
+      const canonicalMembershipId = `${fallbackOrgId}_${fbUser.uid}`;
+      const membership: OrganizationMembership = {
+        id: canonicalMembershipId,
+        organizationId: fallbackOrgId,
+        userId: fbUser.uid,
+        role: 'owner',
+        userEmail: fbUser.email || '',
+        userName: fbUser.displayName || 'Owner',
+        createdAt: new Date().toISOString(),
+      };
       const fallbackUser: UserProfile = {
         id: fbUser.uid,
         email: fbUser.email || 'user@whatsflow.io',
         displayName: fbUser.displayName || 'Owner',
-        currentOrgId: org.id,
+        currentOrgId: fallbackOrgId,
         createdAt: new Date().toISOString(),
       };
-      return { user: fallbackUser, organization: org, membership };
+      return { user: fallbackUser, organization: fallbackOrg, membership };
     }
   },
 
@@ -177,7 +280,7 @@ export const authService = {
         const user = JSON.parse(u) as UserProfile;
         const org = JSON.parse(o) as Organization;
         const membership: OrganizationMembership = {
-          id: `mem_${user.id}`,
+          id: `${org.id}_${user.id}`,
           organizationId: org.id,
           userId: user.id,
           role: 'owner',
@@ -250,6 +353,7 @@ export const authService = {
         } catch (e) {
           const fallback = this.getStoredDemoAuth();
           if (fallback) callback(fallback.user, fallback.organization);
+          else callback(null, null);
         }
       } else {
         const stored = this.getStoredDemoAuth();

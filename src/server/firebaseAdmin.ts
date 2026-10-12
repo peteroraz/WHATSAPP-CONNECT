@@ -1,10 +1,15 @@
-import { initializeApp, applicationDefault, getApps, App } from 'firebase-admin/app';
-import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { initializeApp, applicationDefault, getApps } from 'firebase-admin/app';
+import type { App } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
+import type { Firestore } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
+import type { Auth } from 'firebase-admin/auth';
 import fs from 'fs';
 import path from 'path';
 
 let adminApp: App;
 let adminDb: Firestore;
+let adminAuth: Auth;
 
 export const isCloudRun = Boolean(process.env.K_SERVICE);
 export const isAiStudioPreview = Boolean(
@@ -46,6 +51,7 @@ if (getApps().length === 0) {
 // Named database support: pass databaseId to getFirestore
 const databaseId: string = config.firestoreDatabaseId || '(default)';
 adminDb = getFirestore(adminApp, databaseId);
+adminAuth = getAuth(adminApp);
 
 let isFirestoreAdminAvailable = false;
 
@@ -70,4 +76,4 @@ let isFirestoreAdminAvailable = false;
   }
 })();
 
-export { adminApp, adminDb, databaseId, isFirestoreAdminAvailable };
+export { adminApp, adminDb, adminAuth, databaseId, isFirestoreAdminAvailable };

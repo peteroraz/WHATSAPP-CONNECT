@@ -138,9 +138,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleTestConnection = async () => {
     setConnectionState('Testing');
     try {
+      const headers = await dataStore.getAuthHeaders();
       const res = await fetch('/api/whatsapp/test-connection', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
       });
       const data = await res.json();
       setConnectionDetails(data);
