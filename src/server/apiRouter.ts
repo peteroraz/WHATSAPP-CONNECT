@@ -618,7 +618,16 @@ apiRouter.post(
       const fallbacks = variableFallbacks || {};
 
       for (const [varNum, contactField] of Object.entries(mapping)) {
-        const rawVal = recipient[contactField as string];
+        const fieldKey = contactField as string;
+        let rawVal: any;
+
+        if (fieldKey && fieldKey.startsWith('custom:')) {
+          const customKey = fieldKey.slice(7);
+          rawVal = recipient.customFields?.[customKey];
+        } else {
+          rawVal = recipient[fieldKey];
+        }
+
         const hasVal = rawVal !== undefined && rawVal !== null && String(rawVal).trim() !== '';
         const fallback = fallbacks[varNum]?.trim() || '';
         const finalVal = hasVal ? String(rawVal).trim() : fallback;

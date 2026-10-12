@@ -20,6 +20,7 @@ import {
   sanitizeContactRecord,
   getContactConsentStatus 
 } from '../utils/phoneUtils.ts';
+import { resolveContactField } from '../utils/customFields.ts';
 import { db, auth, handleFirestoreError, OperationType, onAuthStateChanged } from '../lib/firebase.ts';
 import { 
   collection, 
@@ -2035,7 +2036,7 @@ class DataStore {
       const resolvedValues: Record<string, string> = {};
 
       for (const [varNum, fieldKey] of Object.entries(data.variableMapping || {})) {
-        const contactVal = (contact as any)[fieldKey];
+        const contactVal = resolveContactField(contact, fieldKey as string);
         const hasContactVal = contactVal !== undefined && contactVal !== null && String(contactVal).trim() !== '';
         const fallbackVal = data.variableFallbacks?.[varNum]?.trim() || '';
         const finalVal = hasContactVal ? String(contactVal).trim() : fallbackVal;

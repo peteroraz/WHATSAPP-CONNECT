@@ -43,6 +43,11 @@ export interface OrganizationMembership {
   createdAt: string;
 }
 
+export interface ClientCustomFieldDef {
+  key: string;
+  label: string;
+}
+
 export interface Client {
   id: string;
   organizationId: string;
@@ -54,6 +59,7 @@ export interface Client {
   contactEmail?: string;
   contactPhone?: string;
   logoUrl?: string;
+  customContactFields?: ClientCustomFieldDef[];
   createdAt: string;
   updatedAt: string;
 }
@@ -110,6 +116,7 @@ export interface Contact {
   optOutDate?: string;
   optOutSource?: string;
   status: ContactStatus;
+  customFields?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
   isDemo?: boolean;
