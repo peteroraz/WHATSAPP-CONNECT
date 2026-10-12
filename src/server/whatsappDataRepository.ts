@@ -21,6 +21,15 @@ export interface DurableWebhookEvent {
   payload: Record<string, any>;
 }
 
+export interface InboundMessageTransactionResult {
+  alreadyProcessed: boolean;
+  completed: boolean;
+  conversationId: string;
+  unreadCount: number;
+  consentProcessed: boolean;
+  automationProcessed: boolean;
+}
+
 const STATUS_RANK: Record<string, number> = {
   submitted: 1,
   sent: 2,
@@ -639,7 +648,7 @@ export class WhatsAppDataRepository {
     text: string;
     timestamp: string;
     profileName?: string;
-  }): Promise<{ alreadyProcessed: boolean; conversationId: string; unreadCount: number }> {
+  }): Promise<InboundMessageTransactionResult> {
     const { wamid, organizationId, clientId, phoneNumberId, contactId, contactPhone, contactName, text, timestamp, profileName } = params;
     const normalized = normalizeE164(contactPhone);
     const cleanPhoneDigits = normalized.replace(/\D/g, '') || contactPhone.replace(/\D/g, '');
@@ -648,8 +657,8 @@ export class WhatsAppDataRepository {
     const msgId = `msg_wamid_${sanitizedWamid}`;
     const memConvKey = `${organizationId}_${clientId}_${cleanPhoneDigits}`;
 
-    // Payload adheres strictly to required minimum shape:
-    // { wamid, fromPhone, text, profileName, timestamp }
+    // Payload adheres strictly to required minimum shape and lifecycle flags:
+    // { wamid, fromPhone, text, profileName, timestamp, messagePersisted, consentProcessed, automationProcessed, completed }
     const eventPayload = {
       wamid,
       fromPhone: normalized || contactPhone,
@@ -658,6 +667,10 @@ export class WhatsAppDataRepository {
       timestamp,
       conversationId: `cnv_${clientId}_${cleanPhoneDigits}`,
       unreadCount: 1,
+      messagePersisted: true,
+      consentProcessed: false,
+      automationProcessed: false,
+      completed: false,
     };
 
     if (isProduction) {
@@ -669,10 +682,14 @@ export class WhatsAppDataRepository {
           const eventDoc = await transaction.get(eventRef);
           if (eventDoc.exists) {
             const evtData = eventDoc.data();
+            const payload = evtData?.payload || {};
             return {
               alreadyProcessed: true,
-              conversationId: evtData?.payload?.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
-              unreadCount: evtData?.payload?.unreadCount || 0,
+              completed: Boolean(payload.completed),
+              conversationId: payload.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
+              unreadCount: payload.unreadCount || 0,
+              consentProcessed: Boolean(payload.consentProcessed),
+              automationProcessed: Boolean(payload.automationProcessed),
             };
           }
 
@@ -761,8 +778,11 @@ export class WhatsAppDataRepository {
 
           return {
             alreadyProcessed: false,
+            completed: false,
             conversationId: convRef.id,
             unreadCount: nextUnread,
+            consentProcessed: false,
+            automationProcessed: false,
           };
         });
       } catch (err: any) {
@@ -773,10 +793,14 @@ export class WhatsAppDataRepository {
     // Development / preview mode:
     if (this.webhookEvents.has(eventId)) {
       const existingEvt = this.webhookEvents.get(eventId)!;
+      const payload = existingEvt.payload || {};
       return {
         alreadyProcessed: true,
-        conversationId: existingEvt.payload?.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
-        unreadCount: existingEvt.payload?.unreadCount || 0,
+        completed: Boolean(payload.completed),
+        conversationId: payload.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
+        unreadCount: payload.unreadCount || 0,
+        consentProcessed: Boolean(payload.consentProcessed),
+        automationProcessed: Boolean(payload.automationProcessed),
       };
     }
 
@@ -789,10 +813,14 @@ export class WhatsAppDataRepository {
           const eventDoc = await transaction.get(eventRef);
           if (eventDoc.exists) {
             const evtData = eventDoc.data();
+            const payload = evtData?.payload || {};
             return {
               alreadyProcessed: true,
-              conversationId: evtData?.payload?.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
-              unreadCount: evtData?.payload?.unreadCount || 0,
+              completed: Boolean(payload.completed),
+              conversationId: payload.conversationId || `cnv_${clientId}_${cleanPhoneDigits}`,
+              unreadCount: payload.unreadCount || 0,
+              consentProcessed: Boolean(payload.consentProcessed),
+              automationProcessed: Boolean(payload.automationProcessed),
             };
           }
 
@@ -836,7 +864,14 @@ export class WhatsAppDataRepository {
           transaction.set(eventRef, eventData, { merge: true });
 
           this.webhookEvents.set(eventId, eventData);
-          return { alreadyProcessed: false, conversationId: convId, unreadCount: nextUnread };
+          return {
+            alreadyProcessed: false,
+            completed: false,
+            conversationId: convId,
+            unreadCount: nextUnread,
+            consentProcessed: false,
+            automationProcessed: false,
+          };
         });
       } catch (err: any) {
         this.handleDevAdminNotice(err);
@@ -886,9 +921,64 @@ export class WhatsAppDataRepository {
 
     return {
       alreadyProcessed: false,
+      completed: false,
       conversationId: convId,
       unreadCount: nextUnread,
+      consentProcessed: false,
+      automationProcessed: false,
     };
+  }
+
+  /**
+   * 7b. Update durable progress flags on an incoming webhook event.
+   * Ensures idempotency and recovery across Meta retries.
+   */
+  async updateInboundWebhookEventProgress(
+    wamid: string,
+    flags: {
+      messagePersisted?: boolean;
+      consentProcessed?: boolean;
+      automationProcessed?: boolean;
+      completed?: boolean;
+    }
+  ): Promise<void> {
+    const eventId = `incoming_${wamid}`;
+
+    if (isProduction) {
+      try {
+        const eventRef = adminDb.collection('whatsapp_webhook_events').doc(eventId);
+        const updates: Record<string, any> = {};
+        for (const [key, val] of Object.entries(flags)) {
+          updates[`payload.${key}`] = val;
+        }
+        await eventRef.update(updates);
+        const memEvt = this.webhookEvents.get(eventId);
+        if (memEvt && memEvt.payload) {
+          Object.assign(memEvt.payload, flags);
+        }
+        return;
+      } catch (err: any) {
+        this.handleProductionError('updateInboundWebhookEventProgress', err);
+      }
+    }
+
+    // Development / preview memory mode
+    const memEvt = this.webhookEvents.get(eventId);
+    if (memEvt && memEvt.payload) {
+      Object.assign(memEvt.payload, flags);
+    }
+    if (this.adminDbAvailable) {
+      try {
+        const eventRef = adminDb.collection('whatsapp_webhook_events').doc(eventId);
+        const updates: Record<string, any> = {};
+        for (const [key, val] of Object.entries(flags)) {
+          updates[`payload.${key}`] = val;
+        }
+        await eventRef.update(updates);
+      } catch (err: any) {
+        this.handleDevAdminNotice(err);
+      }
+    }
   }
 
   /**

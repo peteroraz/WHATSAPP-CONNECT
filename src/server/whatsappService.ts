@@ -749,15 +749,28 @@ export class WhatsAppService {
       : undefined;
 
     // Resolve routing if phoneNumberId is provided
+    const configuredPhoneId = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
+    const phoneNumberId = (meta?.phoneNumberId || '').trim();
+
     let routeInfo = null;
-    if (meta?.phoneNumberId) {
+    if (phoneNumberId) {
       try {
-        routeInfo = await whatsappDataRepository.resolvePhoneRoute(meta.phoneNumberId);
+        routeInfo = await whatsappDataRepository.resolvePhoneRoute(phoneNumberId);
       } catch (err) {
         if (isProduction) {
           throw err;
         }
-        console.warn('[WhatsAppService] Could not resolve phone route for status update:', meta.phoneNumberId);
+        console.warn('[WhatsAppService] Could not resolve phone route for status update:', phoneNumberId);
+      }
+
+      if (!routeInfo) {
+        if (isProduction && configuredPhoneId && phoneNumberId === configuredPhoneId) {
+          throw new Error(
+            `[Routing Error] Configured production WhatsApp sender ${phoneNumberId} has no active phone route in Firestore for status update. Webhook will not be acknowledged.`
+          );
+        }
+        console.warn(`[WhatsAppService] Ignored status update for unknown/unconfigured phone_number_id: ${phoneNumberId}`);
+        return;
       }
     }
 
@@ -861,16 +874,31 @@ export class WhatsAppService {
       ? new Date(Number(incomingMsg.timestamp) * 1000).toISOString()
       : new Date().toISOString();
 
-    const phoneNumberId = meta.phoneNumberId || '';
+    const configuredPhoneId = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
+    const phoneNumberId = (meta.phoneNumberId || '').trim();
     if (!phoneNumberId) {
       console.warn('[WhatsAppService] Incoming message received without metadata.phone_number_id, cannot route.');
       return;
     }
 
     // 1. Resolve route: phone_number_id -> { organizationId, clientId }
-    const route = await whatsappDataRepository.resolvePhoneRoute(phoneNumberId);
+    let route = null;
+    try {
+      route = await whatsappDataRepository.resolvePhoneRoute(phoneNumberId);
+    } catch (err) {
+      if (isProduction) {
+        throw err;
+      }
+      console.warn('[WhatsAppService] Error resolving route for incoming message:', phoneNumberId, err);
+    }
+
     if (!route) {
-      console.warn(`[WhatsAppService] Unrouted inbound message for phoneNumberId: ${phoneNumberId}. Ignoring.`);
+      if (isProduction && configuredPhoneId && phoneNumberId === configuredPhoneId) {
+        throw new Error(
+          `[Routing Error] Configured production WhatsApp sender ${phoneNumberId} has no active phone route in Firestore. Webhook will not be acknowledged.`
+        );
+      }
+      console.warn(`[WhatsAppService] Ignored inbound message for unknown/unconfigured phone_number_id: ${phoneNumberId}`);
       return;
     }
 
@@ -897,11 +925,10 @@ export class WhatsAppService {
       profileName: meta.contactProfile?.name,
     });
 
-    // Mark as processed in-memory ONLY AFTER durable transaction succeeds
-    this.processedMessageIds.add(wamid);
-
-    if (txResult.alreadyProcessed) {
-      console.log(`[WhatsAppService] Inbound wamid ${wamid} already processed durably.`);
+    // A retry should return immediately ONLY when completed === true!
+    if (txResult.alreadyProcessed && txResult.completed) {
+      this.processedMessageIds.add(wamid);
+      console.log(`[WhatsAppService] Inbound wamid ${wamid} already fully completed.`);
       return;
     }
 
@@ -912,82 +939,88 @@ export class WhatsAppService {
     let autoReplySent: string | null = null;
     let autoReplyMessageId: string | null = null;
 
-    if (consentEvaluation.isOptOutCommand) {
-      // Durable server-side STOP handling
-      await whatsappDataRepository.updateContactOptOut({
-        contactId: contact.id,
-        organizationId: route.organizationId,
-        clientId: route.clientId,
-        phone: normalizedPhone || formattedPhone,
-        optOutDate: msgTimestamp,
-        source: 'Inbound WhatsApp STOP Command',
-        wamid,
-      });
-
-      // Trigger opt-out confirmation message
-      if (consentEvaluation.suggestedReply) {
-        const replyResult = await this.sendTextMessage({
-          to: senderPhone,
-          body: consentEvaluation.suggestedReply,
+    if (!txResult.consentProcessed) {
+      if (consentEvaluation.isOptOutCommand) {
+        // Durable server-side STOP handling
+        await whatsappDataRepository.updateContactOptOut({
+          contactId: contact.id,
+          organizationId: route.organizationId,
+          clientId: route.clientId,
+          phone: normalizedPhone || formattedPhone,
+          optOutDate: msgTimestamp,
+          source: 'Inbound WhatsApp STOP Command',
+          wamid,
         });
-        if (replyResult.success) {
-          autoReplySent = consentEvaluation.suggestedReply;
-          autoReplyMessageId = replyResult.messageId || null;
 
-          await whatsappDataRepository.persistOutgoingMessage({
-            conversationId,
-            organizationId: route.organizationId,
-            clientId: route.clientId,
-            contactId: contact.id,
-            recipient: normalizedPhone || formattedPhone,
-            wamid: autoReplyMessageId || undefined,
-            text: autoReplySent,
-            senderType: 'automation',
-            status: 'submitted',
-            timestamp: new Date().toISOString(),
+        // Trigger opt-out confirmation message
+        if (consentEvaluation.suggestedReply) {
+          const replyResult = await this.sendTextMessage({
+            to: senderPhone,
+            body: consentEvaluation.suggestedReply,
           });
+          if (replyResult.success) {
+            autoReplySent = consentEvaluation.suggestedReply;
+            autoReplyMessageId = replyResult.messageId || null;
+
+            await whatsappDataRepository.persistOutgoingMessage({
+              conversationId,
+              organizationId: route.organizationId,
+              clientId: route.clientId,
+              contactId: contact.id,
+              recipient: normalizedPhone || formattedPhone,
+              wamid: autoReplyMessageId || undefined,
+              text: autoReplySent,
+              senderType: 'automation',
+              status: 'submitted',
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
+      } else if (consentEvaluation.isOptInCommand) {
+        // Durable server-side START handling
+        await whatsappDataRepository.updateContactOptIn({
+          contactId: contact.id,
+          organizationId: route.organizationId,
+          clientId: route.clientId,
+          phone: normalizedPhone || formattedPhone,
+          timestamp: msgTimestamp,
+          source: 'Inbound WhatsApp START Command',
+          wamid,
+        });
+
+        if (consentEvaluation.suggestedReply) {
+          const replyResult = await this.sendTextMessage({
+            to: senderPhone,
+            body: consentEvaluation.suggestedReply,
+          });
+          if (replyResult.success) {
+            autoReplySent = consentEvaluation.suggestedReply;
+            autoReplyMessageId = replyResult.messageId || null;
+
+            await whatsappDataRepository.persistOutgoingMessage({
+              conversationId,
+              organizationId: route.organizationId,
+              clientId: route.clientId,
+              contactId: contact.id,
+              recipient: normalizedPhone || formattedPhone,
+              wamid: autoReplyMessageId || undefined,
+              text: autoReplySent,
+              senderType: 'automation',
+              status: 'submitted',
+              timestamp: new Date().toISOString(),
+            });
+          }
         }
       }
-    } else if (consentEvaluation.isOptInCommand) {
-      // Durable server-side START handling
-      await whatsappDataRepository.updateContactOptIn({
-        contactId: contact.id,
-        organizationId: route.organizationId,
-        clientId: route.clientId,
-        phone: normalizedPhone || formattedPhone,
-        timestamp: msgTimestamp,
-        source: 'Inbound WhatsApp START Command',
-        wamid,
+
+      await whatsappDataRepository.updateInboundWebhookEventProgress(wamid, {
+        consentProcessed: true,
       });
+    }
 
-      if (consentEvaluation.suggestedReply) {
-        const replyResult = await this.sendTextMessage({
-          to: senderPhone,
-          body: consentEvaluation.suggestedReply,
-        });
-        if (replyResult.success) {
-          autoReplySent = consentEvaluation.suggestedReply;
-          autoReplyMessageId = replyResult.messageId || null;
-
-          await whatsappDataRepository.persistOutgoingMessage({
-            conversationId,
-            organizationId: route.organizationId,
-            clientId: route.clientId,
-            contactId: contact.id,
-            recipient: normalizedPhone || formattedPhone,
-            wamid: autoReplyMessageId || undefined,
-            text: autoReplySent,
-            senderType: 'automation',
-            status: 'submitted',
-            timestamp: new Date().toISOString(),
-          });
-        }
-      }
-    } else {
-      // 5. Evaluate active automation rules from Firestore (durable)
-      if (!this.processedAutomationIds.has(wamid)) {
-        this.processedAutomationIds.add(wamid);
-
+    // 5. Evaluate active automation rules from Firestore (durable)
+    if (!consentEvaluation.isOptOutCommand && !consentEvaluation.isOptInCommand) {
+      if (!txResult.automationProcessed) {
         const activeRules = await whatsappDataRepository.getAutomationRules(
           route.organizationId,
           route.clientId
@@ -1050,8 +1083,21 @@ export class WhatsAppService {
             }
           }
         }
+
+        await whatsappDataRepository.updateInboundWebhookEventProgress(wamid, {
+          automationProcessed: true,
+        });
+        this.processedAutomationIds.add(wamid);
       }
     }
+
+    // 6. Complete durable processing lifecycle
+    await whatsappDataRepository.updateInboundWebhookEventProgress(wamid, {
+      completed: true,
+    });
+
+    // 7. Add to in-memory set ONLY at the very end of successful processing!
+    this.processedMessageIds.add(wamid);
 
     // Record incoming message event for UI real-time sync buffer
     this.addEventRecord({
