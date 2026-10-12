@@ -1,6 +1,7 @@
 import express, { Router } from 'express';
 import type { Request, Response } from 'express';
 import { whatsappService } from './whatsappService.ts';
+import { whatsappDataRepository } from './whatsappDataRepository.ts';
 import { evaluateMessageConsentCommands } from './optOutHandler.ts';
 import { evaluateAutomationRules } from './automationRunner.ts';
 import type { AutomationRule } from '../types/index.ts';
@@ -58,13 +59,19 @@ apiRouter.get('/whatsapp/status', (_req: Request, res: Response) => {
  * Reads hub.mode, hub.verify_token, hub.challenge.
  * If mode is subscribe and supplied verify token matches WHATSAPP_WEBHOOK_VERIFY_TOKEN,
  * returns the challenge with HTTP 200. Otherwise returns HTTP 403.
+ * Strictly uses process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN without hardcoded fallbacks.
  */
 const handleWebhookVerification = (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  const configuredToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || 'whatsflow_verify_token_prod_2025';
+  const configuredToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+
+  if (!configuredToken) {
+    console.error('[Webhook Verification Failed] WHATSAPP_WEBHOOK_VERIFY_TOKEN is not configured on server.');
+    return res.status(403).send('Forbidden');
+  }
 
   if (mode === 'subscribe' && token === configuredToken) {
     console.log('[Webhook Verification] Meta challenge verified successfully');
@@ -82,8 +89,8 @@ apiRouter.get('/webhook', handleWebhookVerification);
  * WEBHOOK EVENTS (POST /api/whatsapp/webhook and POST /api/webhook)
  * Verify authenticity using Meta App Secret and X-Hub-Signature-256 header.
  * Reject invalid signatures.
- * Return HTTP 200 quickly so Meta does not retry unnecessarily.
- * Process business logic asynchronously.
+ * Await durable webhook processing BEFORE returning 200 EVENT_RECEIVED.
+ * If durable persistence fails, return 500 error so Meta can retry.
  */
 const handleWebhookPost = async (req: Request, res: Response) => {
   try {
@@ -97,27 +104,59 @@ const handleWebhookPost = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Invalid webhook signature' });
     }
 
-    // Acknowledge Meta immediately with HTTP 200 OK
-    res.status(200).send('EVENT_RECEIVED');
+    // Await durable webhook processing synchronously before acknowledging
+    await whatsappService.processWebhook(req.body);
 
-    // Asynchronous processing of incoming messages and status webhooks
-    setImmediate(async () => {
-      try {
-        await whatsappService.processWebhook(req.body);
-      } catch (err: any) {
-        console.error('[Async Webhook Processing Error]:', err?.message);
-      }
-    });
+    // Return 200 OK only after successful durable processing
+    return res.status(200).send('EVENT_RECEIVED');
   } catch (err: any) {
-    console.error('[Webhook POST Exception]:', err?.message);
+    console.error('[Webhook POST Exception]:', err?.message || err);
     if (!res.headersSent) {
-      return res.status(500).json({ error: 'Server error processing webhook' });
+      return res.status(500).json({ error: 'Server error persisting durable webhook' });
     }
   }
 };
 
 apiRouter.post('/whatsapp/webhook', handleWebhookPost);
 apiRouter.post('/webhook', handleWebhookPost);
+
+/**
+ * REGISTER DEFAULT ROUTE (POST /api/whatsapp/register-default-route)
+ * Maps current WHATSAPP_PHONE_NUMBER_ID to tenant organizationId and defaultClientId.
+ * Does not accept phoneNumberId from browser.
+ */
+apiRouter.post('/api/whatsapp/register-default-route', async (req: Request, res: Response) => {
+  try {
+    const { organizationId, clientId } = req.body;
+    if (!organizationId || !clientId) {
+      return res.status(400).json({ error: 'organizationId and clientId are required' });
+    }
+    const result = await whatsappDataRepository.registerDefaultRoute(organizationId, clientId);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to register default route' });
+  }
+});
+
+// Also mount at /whatsapp/register-default-route for consistency
+apiRouter.post('/whatsapp/register-default-route', async (req: Request, res: Response) => {
+  try {
+    const { organizationId, clientId } = req.body;
+    if (!organizationId || !clientId) {
+      return res.status(400).json({ error: 'organizationId and clientId are required' });
+    }
+    const result = await whatsappDataRepository.registerDefaultRoute(organizationId, clientId);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to register default route' });
+  }
+});
 
 /**
  * TEST CONNECTION (POST /api/whatsapp/test-connection)
@@ -166,9 +205,27 @@ apiRouter.get('/whatsapp/templates', handleSyncTemplates);
  */
 apiRouter.post('/whatsapp/sync-rules', (req: Request, res: Response) => {
   try {
-    const { rules } = req.body;
+    const { rules, organizationId, clientId } = req.body;
     if (Array.isArray(rules)) {
       whatsappService.updateAutomationRulesCache(rules);
+      if (organizationId && clientId) {
+        whatsappDataRepository.updateAutomationRulesCache(organizationId, clientId, rules);
+      }
+    }
+    return res.json({ success: true, count: Array.isArray(rules) ? rules.length : 0 });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message });
+  }
+});
+
+apiRouter.post('/api/whatsapp/sync-rules', (req: Request, res: Response) => {
+  try {
+    const { rules, organizationId, clientId } = req.body;
+    if (Array.isArray(rules)) {
+      whatsappService.updateAutomationRulesCache(rules);
+      if (organizationId && clientId) {
+        whatsappDataRepository.updateAutomationRulesCache(organizationId, clientId, rules);
+      }
     }
     return res.json({ success: true, count: Array.isArray(rules) ? rules.length : 0 });
   } catch (err: any) {
@@ -177,14 +234,34 @@ apiRouter.post('/whatsapp/sync-rules', (req: Request, res: Response) => {
 });
 
 /**
- * GET WEBHOOK EVENTS (GET /api/whatsapp/events)
- * Allows the React UI to synchronize recent incoming messages and status webhooks in real-time.
+ * GET WEBHOOK EVENTS (GET /api/whatsapp/events and GET /whatsapp/events)
+ * Serves durable webhook events from Firestore via whatsappDataRepository.
+ * Supports since, clientId, and limit (max 500).
  */
-apiRouter.get('/whatsapp/events', (req: Request, res: Response) => {
-  const since = req.query.since as string | undefined;
-  const events = whatsappService.getEventsSince(since);
-  return res.json({ success: true, events });
-});
+const handleGetEvents = async (req: Request, res: Response) => {
+  try {
+    const since = req.query.since as string | undefined;
+    const clientId = req.query.clientId as string | undefined;
+    const limitQuery = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+    const limit = Math.min(isNaN(limitQuery) ? 100 : limitQuery, 500);
+
+    const events = await whatsappDataRepository.getDurableWebhookEvents({
+      since,
+      clientId,
+      limit,
+    });
+
+    return res.json({ success: true, events });
+  } catch (err: any) {
+    console.error('[API Router] Error fetching durable webhook events:', err?.message || err);
+    // In-memory fallback if Firestore read error
+    const fallbackEvents = whatsappService.getEventsSince(req.query.since as string);
+    return res.json({ success: true, events: fallbackEvents });
+  }
+};
+
+apiRouter.get('/whatsapp/events', handleGetEvents);
+apiRouter.get('/api/whatsapp/events', handleGetEvents);
 
 /**
  * DIAGNOSTIC OUTBOUND TEST (POST /api/whatsapp/test-send-hello-world)

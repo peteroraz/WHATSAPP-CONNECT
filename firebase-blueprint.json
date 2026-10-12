@@ -91,6 +91,7 @@
         "firstName": { "type": "string" },
         "lastName": { "type": "string" },
         "phone": { "type": "string" },
+        "normalizedPhone": { "type": "string" },
         "email": { "type": "string" },
         "company": { "type": "string" },
         "whatsappOptIn": { "type": "boolean" },
@@ -149,6 +150,7 @@
         "organizationId": { "type": "string" },
         "clientId": { "type": "string" },
         "contactPhone": { "type": "string" },
+        "normalizedPhone": { "type": "string" },
         "status": { "type": "string", "enum": ["Open", "Closed"] }
       },
       "required": ["organizationId", "contactPhone", "status"]
@@ -180,6 +182,36 @@
         "status": { "type": "string", "enum": ["active", "inactive"] }
       },
       "required": ["organizationId", "name", "trigger", "actionType", "status"]
+    },
+    "WhatsAppPhoneRoute": {
+      "title": "WhatsAppPhoneRoute",
+      "description": "Server-side routing table from Meta phone_number_id to tenant organization and client",
+      "type": "object",
+      "properties": {
+        "phoneNumberId": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["phoneNumberId", "organizationId", "clientId", "active"]
+    },
+    "WhatsAppWebhookEvent": {
+      "title": "WhatsAppWebhookEvent",
+      "description": "Durable record of raw inbound and status webhook events",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "clientId": { "type": "string" },
+        "phoneNumberId": { "type": "string" },
+        "type": { "type": "string", "enum": ["incoming_message", "status_update"] },
+        "wamid": { "type": "string" },
+        "eventTimestamp": { "type": "string" },
+        "receivedAt": { "type": "string" }
+      },
+      "required": ["id", "organizationId", "clientId", "phoneNumberId", "type", "wamid"]
     }
   },
   "firestore": {
@@ -242,6 +274,14 @@
     "/audit_logs/{logId}": {
       "schema": "Organization",
       "description": "System audit logs"
+    },
+    "/whatsapp_phone_routes/{phoneNumberId}": {
+      "schema": "WhatsAppPhoneRoute",
+      "description": "Phone number to organization and client routing table"
+    },
+    "/whatsapp_webhook_events/{eventId}": {
+      "schema": "WhatsAppWebhookEvent",
+      "description": "Durable record of incoming messages and status webhooks"
     }
   }
 }

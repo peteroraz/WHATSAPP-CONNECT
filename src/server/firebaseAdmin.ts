@@ -37,4 +37,25 @@ if (getApps().length === 0) {
 const databaseId: string = config.firestoreDatabaseId || '(default)';
 adminDb = getFirestore(adminApp, databaseId);
 
-export { adminApp, adminDb, databaseId };
+let isFirestoreAdminAvailable = false;
+
+// Test connectivity / IAM validation non-destructively
+(async () => {
+  try {
+    // Quick test read to verify credentials against the named database
+    await adminDb.collection('whatsapp_phone_routes').limit(1).get();
+    isFirestoreAdminAvailable = true;
+    console.info('[FirebaseAdmin] Connected to Firestore successfully.');
+  } catch (err: any) {
+    const msg = String(err?.message || '');
+    if (err?.code === 7 || msg.toLowerCase().includes('permission') || msg.toLowerCase().includes('denied') || msg.toLowerCase().includes('unauthenticated')) {
+      isFirestoreAdminAvailable = false;
+      console.info('[FirebaseAdmin] Admin Firestore running in delegated mode (sandbox ADC without direct IAM). Resilient store active.');
+    } else {
+      isFirestoreAdminAvailable = false;
+      console.warn('[FirebaseAdmin] Firestore note during initialization:', err?.code || msg);
+    }
+  }
+})();
+
+export { adminApp, adminDb, databaseId, isFirestoreAdminAvailable };

@@ -172,6 +172,7 @@ function MainApp({ onNavigate }: MainAppProps) {
           onNavigateTab={(tab) => setCurrentTab(tab)}
           onSelectConversation={(convId) => {
             setSelectedConversationId(convId);
+            dataStore.setActiveConversationId(convId);
             dataStore.markConversationAsRead(convId);
           }}
         />
@@ -231,6 +232,7 @@ function MainApp({ onNavigate }: MainAppProps) {
           selectedConversationId={selectedConversationId}
           onSelectConversation={(id) => {
             setSelectedConversationId(id);
+            dataStore.setActiveConversationId(id);
             dataStore.markConversationAsRead(id);
           }}
           onSendMessage={(convId, text) =>

@@ -91,6 +91,16 @@ service cloud.firestore {
       allow read, write: if isAuthenticated();
     }
 
+    // WhatsApp Phone Routes
+    match /whatsapp_phone_routes/{phoneNumberId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // WhatsApp Webhook Events
+    match /whatsapp_webhook_events/{eventId} {
+      allow read, write: if isAuthenticated();
+    }
+
     // Default fallback
     match /{document=**} {
       allow read, write: if isAuthenticated();

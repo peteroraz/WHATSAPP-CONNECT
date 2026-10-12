@@ -8,6 +8,7 @@
 import crypto from 'crypto';
 import { evaluateMessageConsentCommands } from './optOutHandler.ts';
 import { evaluateAutomationRules } from './automationRunner.ts';
+import { whatsappDataRepository, normalizeE164 } from './whatsappDataRepository.ts';
 import type { AutomationRule, MessageTemplate } from '../types/index.ts';
 
 export interface WhatsAppConfigStatus {
@@ -160,9 +161,14 @@ export class WhatsAppService {
    * Verify signature using Meta App Secret and X-Hub-Signature-256 header.
    */
   public verifySignature(rawBody: Buffer | string, signatureHeader?: string): boolean {
-    const { appSecret } = this.getCredentials();
+    const { appSecret, configured } = this.getCredentials();
     if (!appSecret) {
-      // If Meta App Secret is not configured in env, allow in dev/demo mode
+      // Fail closed for Live Mode: If live WhatsApp connection is configured, never accept unsigned requests
+      if (configured) {
+        console.warn('[Webhook Signature] Rejecting webhook: WHATSAPP_APP_SECRET is not configured for live connection.');
+        return false;
+      }
+      // Demo Mode only: allow simulation
       return true;
     }
     if (!signatureHeader) {
@@ -681,7 +687,10 @@ export class WhatsAppService {
         // A. Handle Status Updates (sent, delivered, read, failed)
         if (Array.isArray(value.statuses) && value.statuses.length > 0) {
           for (const statusUpdate of value.statuses) {
-            await this.processMessageStatus(statusUpdate);
+            await this.processMessageStatus(statusUpdate, {
+              phoneNumberId,
+              displayPhoneNumber,
+            });
           }
         }
 
@@ -704,15 +713,21 @@ export class WhatsAppService {
    * Handles: sent, delivered, read, failed
    * Match events using Meta's WhatsApp message ID.
    * Make webhook processing idempotent.
-   * Updates message and campaign recipient records.
+   * Updates message and campaign recipient records durably in Firestore.
    */
-  public async processMessageStatus(statusUpdate: {
-    id: string; // Meta wamid
-    status: 'sent' | 'delivered' | 'read' | 'failed';
-    timestamp?: string;
-    recipient_id?: string;
-    errors?: any[];
-  }): Promise<void> {
+  public async processMessageStatus(
+    statusUpdate: {
+      id: string; // Meta wamid
+      status: 'sent' | 'delivered' | 'read' | 'failed';
+      timestamp?: string;
+      recipient_id?: string;
+      errors?: any[];
+    },
+    meta?: {
+      phoneNumberId?: string;
+      displayPhoneNumber?: string;
+    }
+  ): Promise<void> {
     const wamid = statusUpdate.id;
     const status = statusUpdate.status;
 
@@ -733,7 +748,49 @@ export class WhatsAppService {
       ? this.sanitizeError(statusUpdate.errors[0]?.message || statusUpdate.errors[0]?.title || 'Meta delivery failure')
       : undefined;
 
-    // Record status update event
+    // Resolve routing if phoneNumberId is provided
+    let routeInfo = null;
+    if (meta?.phoneNumberId) {
+      try {
+        routeInfo = await whatsappDataRepository.resolvePhoneRoute(meta.phoneNumberId);
+      } catch (err) {
+        console.warn('[WhatsAppService] Could not resolve phone route for status update:', meta.phoneNumberId);
+      }
+    }
+
+    // Persist durable event status_<wamid>_<status>
+    if (routeInfo) {
+      try {
+        await whatsappDataRepository.persistWebhookEvent({
+          id: `status_${wamid}_${status}`,
+          organizationId: routeInfo.organizationId,
+          clientId: routeInfo.clientId,
+          phoneNumberId: meta?.phoneNumberId || '',
+          type: 'status_update',
+          wamid,
+          eventTimestamp,
+          receivedAt: new Date().toISOString(),
+          payload: {
+            status,
+            recipientId: statusUpdate.recipient_id,
+            failureReason,
+            displayPhoneNumber: meta?.displayPhoneNumber,
+          },
+        });
+      } catch (err: any) {
+        console.warn('[WhatsAppService] Notice persisting status webhook event:', err?.message || err);
+      }
+    }
+
+    // Durable Firestore updates: message status, campaign recipient, and campaign aggregates
+    try {
+      await whatsappDataRepository.updateMessageDeliveryStatus(wamid, status, eventTimestamp, failureReason);
+      await whatsappDataRepository.updateCampaignRecipientStatus(wamid, status, eventTimestamp, failureReason);
+    } catch (err: any) {
+      console.warn('[WhatsAppService] Notice updating durable message/recipient status:', err?.message || err);
+    }
+
+    // Record status update event in memory buffer for live UI polling fallback
     this.addEventRecord({
       id: `evt_status_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: 'status_update',
@@ -749,16 +806,16 @@ export class WhatsAppService {
   }
 
   /**
-   * Process individual incoming WhatsApp message:
-   * - Idempotency
-   * - Identify org
-   * - Find or create contact (default 'Not Consented')
-   * - Create/update conversation
-   * - Save incoming message with wamid
-   * - Update lastIncomingMessageAt
-   * - Increment unread count
-   * - Run STOP/opt-out processing BEFORE automations
-   * - Evaluate active automation rules
+   * Process individual incoming WhatsApp message durably:
+   * - Verify unique wamid
+   * - Resolve phone route
+   * - Persist durable WebhookEvent
+   * - Find/create Contact
+   * - Find/create Conversation with atomic unread increment & message persistence
+   * - Evaluate STOP/START
+   * - Load Client automation rules from Firestore
+   * - Optionally send automation reply and persist outgoing message
+   * All of this works even if no WatsManager browser is open.
    */
   private async processIncomingMessage(
     incomingMsg: {
@@ -777,25 +834,80 @@ export class WhatsAppService {
     const wamid = incomingMsg.id;
     if (!wamid) return;
 
-    // Idempotency check: incoming message ID
+    // Fast in-memory deduplication check
     if (this.processedMessageIds.has(wamid)) {
       return;
     }
-    this.processedMessageIds.add(wamid);
 
     const senderPhone = incomingMsg.from;
     const formattedPhone = senderPhone.startsWith('+') ? senderPhone : `+${senderPhone}`;
+    const normalizedPhone = normalizeE164(senderPhone);
     const textBody = incomingMsg.text?.body || (incomingMsg.type !== 'text' ? `[${incomingMsg.type} message]` : '');
     const msgTimestamp = incomingMsg.timestamp
       ? new Date(Number(incomingMsg.timestamp) * 1000).toISOString()
       : new Date().toISOString();
 
-    // 1. Opt-out / Opt-in Command Processing (runs BEFORE normal automations)
+    const phoneNumberId = meta.phoneNumberId || '';
+    if (!phoneNumberId) {
+      console.warn('[WhatsAppService] Incoming message received without metadata.phone_number_id, cannot route.');
+      return;
+    }
+
+    // 1. Resolve route: phone_number_id -> { organizationId, clientId }
+    const route = await whatsappDataRepository.resolvePhoneRoute(phoneNumberId);
+    if (!route) {
+      console.warn(`[WhatsAppService] Unrouted inbound message for phoneNumberId: ${phoneNumberId}. Ignoring.`);
+      return;
+    }
+
+    this.processedMessageIds.add(wamid);
+
+    // 2. Find or create Contact in Firestore
+    const contact = await whatsappDataRepository.findOrCreateInboundContact({
+      organizationId: route.organizationId,
+      clientId: route.clientId,
+      phone: normalizedPhone || formattedPhone,
+      profileName: meta.contactProfile?.name,
+      timestamp: msgTimestamp,
+    });
+
+    // 3. Atomically process inbound message, update conversation, and persist incoming_<wamid>
+    const txResult = await whatsappDataRepository.processInboundMessageTransaction({
+      wamid,
+      organizationId: route.organizationId,
+      clientId: route.clientId,
+      phoneNumberId,
+      contactId: contact.id,
+      contactPhone: normalizedPhone || formattedPhone,
+      contactName: `${contact.firstName} ${contact.lastName}`.trim() || meta.contactProfile?.name || normalizedPhone,
+      text: textBody,
+      timestamp: msgTimestamp,
+    });
+
+    if (txResult.alreadyProcessed) {
+      console.log(`[WhatsAppService] Inbound wamid ${wamid} already processed durably.`);
+      return;
+    }
+
+    const conversationId = txResult.conversationId;
+
+    // 4. Opt-out / Opt-in Command Processing (runs BEFORE normal automations)
     const consentEvaluation = evaluateMessageConsentCommands(textBody);
     let autoReplySent: string | null = null;
     let autoReplyMessageId: string | null = null;
 
     if (consentEvaluation.isOptOutCommand) {
+      // Durable server-side STOP handling
+      await whatsappDataRepository.updateContactOptOut({
+        contactId: contact.id,
+        organizationId: route.organizationId,
+        clientId: route.clientId,
+        phone: normalizedPhone || formattedPhone,
+        optOutDate: msgTimestamp,
+        source: 'Inbound WhatsApp STOP Command',
+        wamid,
+      });
+
       // Trigger opt-out confirmation message
       if (consentEvaluation.suggestedReply) {
         const replyResult = await this.sendTextMessage({
@@ -805,9 +917,33 @@ export class WhatsAppService {
         if (replyResult.success) {
           autoReplySent = consentEvaluation.suggestedReply;
           autoReplyMessageId = replyResult.messageId || null;
+
+          await whatsappDataRepository.persistOutgoingMessage({
+            conversationId,
+            organizationId: route.organizationId,
+            clientId: route.clientId,
+            contactId: contact.id,
+            recipient: normalizedPhone || formattedPhone,
+            wamid: autoReplyMessageId || undefined,
+            text: autoReplySent,
+            senderType: 'automation',
+            status: 'submitted',
+            timestamp: new Date().toISOString(),
+          });
         }
       }
     } else if (consentEvaluation.isOptInCommand) {
+      // Durable server-side START handling
+      await whatsappDataRepository.updateContactOptIn({
+        contactId: contact.id,
+        organizationId: route.organizationId,
+        clientId: route.clientId,
+        phone: normalizedPhone || formattedPhone,
+        timestamp: msgTimestamp,
+        source: 'Inbound WhatsApp START Command',
+        wamid,
+      });
+
       if (consentEvaluation.suggestedReply) {
         const replyResult = await this.sendTextMessage({
           to: senderPhone,
@@ -816,44 +952,92 @@ export class WhatsAppService {
         if (replyResult.success) {
           autoReplySent = consentEvaluation.suggestedReply;
           autoReplyMessageId = replyResult.messageId || null;
+
+          await whatsappDataRepository.persistOutgoingMessage({
+            conversationId,
+            organizationId: route.organizationId,
+            clientId: route.clientId,
+            contactId: contact.id,
+            recipient: normalizedPhone || formattedPhone,
+            wamid: autoReplyMessageId || undefined,
+            text: autoReplySent,
+            senderType: 'automation',
+            status: 'submitted',
+            timestamp: new Date().toISOString(),
+          });
         }
       }
     } else {
-      // 2. Evaluate active automation rules (idempotently per incoming message)
-      if (!this.processedAutomationIds.has(wamid) && this.cachedAutomationRules.length > 0) {
+      // 5. Evaluate active automation rules from Firestore (durable)
+      if (!this.processedAutomationIds.has(wamid)) {
         this.processedAutomationIds.add(wamid);
 
-        const match = evaluateAutomationRules(this.cachedAutomationRules, {
-          messageBody: textBody,
-          isFirstMessage: false,
-          currentDate: new Date(),
-        });
+        const activeRules = await whatsappDataRepository.getAutomationRules(
+          route.organizationId,
+          route.clientId
+        );
 
-        if (match) {
-          if (match.responseBody) {
-            const autoRes = await this.sendTextMessage({
-              to: senderPhone,
-              body: match.responseBody,
-            });
-            if (autoRes.success) {
-              autoReplySent = match.responseBody;
-              autoReplyMessageId = autoRes.messageId || null;
-            }
-          } else if (match.templateId) {
-            const autoRes = await this.sendTemplateMessage({
-              to: senderPhone,
-              templateName: match.templateId,
-            });
-            if (autoRes.success) {
-              autoReplySent = `[Template: ${match.templateId}]`;
-              autoReplyMessageId = autoRes.messageId || null;
+        if (activeRules.length > 0) {
+          const match = evaluateAutomationRules(activeRules, {
+            messageBody: textBody,
+            isFirstMessage: contact.isNew,
+            currentDate: new Date(),
+          });
+
+          if (match) {
+            if (match.responseBody) {
+              const autoRes = await this.sendTextMessage({
+                to: senderPhone,
+                body: match.responseBody,
+              });
+              if (autoRes.success) {
+                autoReplySent = match.responseBody;
+                autoReplyMessageId = autoRes.messageId || null;
+
+                await whatsappDataRepository.persistOutgoingMessage({
+                  conversationId,
+                  organizationId: route.organizationId,
+                  clientId: route.clientId,
+                  contactId: contact.id,
+                  recipient: normalizedPhone || formattedPhone,
+                  wamid: autoReplyMessageId || undefined,
+                  text: autoReplySent,
+                  senderType: 'automation',
+                  status: 'submitted',
+                  timestamp: new Date().toISOString(),
+                });
+              }
+            } else if (match.templateId) {
+              const autoRes = await this.sendTemplateMessage({
+                to: senderPhone,
+                templateName: match.templateId,
+              });
+              if (autoRes.success) {
+                autoReplySent = `[Template: ${match.templateId}]`;
+                autoReplyMessageId = autoRes.messageId || null;
+
+                await whatsappDataRepository.persistOutgoingMessage({
+                  conversationId,
+                  organizationId: route.organizationId,
+                  clientId: route.clientId,
+                  contactId: contact.id,
+                  recipient: normalizedPhone || formattedPhone,
+                  wamid: autoReplyMessageId || undefined,
+                  text: autoReplySent,
+                  senderType: 'automation',
+                  messageType: 'template',
+                  templateName: match.templateId,
+                  status: 'submitted',
+                  timestamp: new Date().toISOString(),
+                });
+              }
             }
           }
         }
       }
     }
 
-    // Record incoming message event for UI real-time sync
+    // Record incoming message event for UI real-time sync buffer
     this.addEventRecord({
       id: `evt_inbound_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: 'incoming_message',

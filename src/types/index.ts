@@ -88,6 +88,7 @@ export interface Contact {
   firstName: string;
   lastName: string;
   phone: string; // E.164 format (+234...)
+  normalizedPhone?: string; // Canonical E.164 format (+2348061234567)
   email: string;
   company: string;
   tags: string[];
@@ -220,6 +221,7 @@ export interface Conversation {
   clientId: string;
   contactId: string;
   contactPhone: string;
+  normalizedPhone?: string; // Canonical E.164 format (+2348061234567)
   contactName: string;
   lastMessage: string;
   lastMessageAt: string;

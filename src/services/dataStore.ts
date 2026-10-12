@@ -29,14 +29,18 @@ import {
   query, 
   where, 
   deleteDoc, 
-  updateDoc 
+  updateDoc,
+  onSnapshot,
+  Unsubscribe
 } from 'firebase/firestore';
 
 class DataStore {
   private orgId: string = 'default_org';
   private initialized: boolean = false;
   private listeners: Set<() => void> = new Set();
-  private lastEventSyncTimestamp: string = '';
+  private clientEventCursors: Map<string, string> = new Map();
+  private conversationsUnsub: Unsubscribe | null = null;
+  private messagesUnsub: Unsubscribe | null = null;
   private eventSyncTimer: any = null;
   private processedEventIds: Set<string> = new Set();
   private isPolling: boolean = false;
@@ -86,6 +90,13 @@ class DataStore {
     try {
       localStorage.setItem(`watsmanager_${this.orgId}_active_client`, clientId);
     } catch {}
+
+    // Switch Firestore subscriptions to the new Client
+    this.subscribeClientFirestore(this.orgId, clientId);
+
+    // Poll events for new client with client-specific cursor
+    this.pollEvents();
+
     this.notify();
   }
 
@@ -357,6 +368,23 @@ class DataStore {
     patchRecords(this.auditLogs, 'audit_logs');
     patchRecords(this.optInHistory, 'opt_in_history');
 
+    // Populate normalizedPhone for existing contacts & conversations where missing
+    this.contacts.forEach((contact) => {
+      if (!contact.normalizedPhone && contact.phone) {
+        const norm = normalizePhoneNumber(contact.phone);
+        contact.normalizedPhone = norm.isValid ? norm.normalized : (contact.phone.startsWith('+') ? contact.phone : `+${contact.phone.replace(/\D/g, '')}`);
+        this.persistDoc('contacts', contact.id, { normalizedPhone: contact.normalizedPhone });
+      }
+    });
+
+    this.conversations.forEach((conv) => {
+      if (!conv.normalizedPhone && conv.contactPhone) {
+        const norm = normalizePhoneNumber(conv.contactPhone);
+        conv.normalizedPhone = norm.isValid ? norm.normalized : (conv.contactPhone.startsWith('+') ? conv.contactPhone : `+${conv.contactPhone.replace(/\D/g, '')}`);
+        this.persistDoc('conversations', conv.id, { normalizedPhone: conv.normalizedPhone });
+      }
+    });
+
     // Purge any stale hard-coded placeholder strings from existing connections
     this.whatsappConnections.forEach((conn) => {
       let changed = false;
@@ -539,10 +567,29 @@ class DataStore {
     this.initialized = true;
     this.notify();
 
+    // Start client Firestore inbox real-time listeners for active client
+    if (this.activeClientId) {
+      this.subscribeClientFirestore(organizationId, this.activeClientId);
+    }
+
     // Start background webhook event polling and rules synchronization
     this.startEventPolling();
     this.syncAutomationRulesToServer();
-    this.checkServerWhatsAppStatus();
+    this.checkServerWhatsAppStatus().then(() => {
+      // Once organization is known, default client exists, and server WhatsApp is connected, register default route idempotently
+      if (this.serverWhatsAppStatus === 'Connected') {
+        fetch(this.getApiUrl('/api/whatsapp/register-default-route'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            organizationId,
+            clientId: effectiveDefaultClientId,
+          }),
+        }).catch((err) => {
+          console.warn('[DataStore] Default route registration note:', err?.message || err);
+        });
+      }
+    });
 
     // Async sync with Firestore in background if online
     this.syncFromFirestore().catch(() => {});
@@ -574,6 +621,18 @@ class DataStore {
           if (data.verifiedDisplayName) defaultConn.verifiedDisplayName = data.verifiedDisplayName;
           defaultConn.updatedAt = new Date().toISOString();
           this.persistDoc('whatsapp_connections', defaultConn.id, defaultConn);
+        }
+
+        // Idempotently ensure default route registration when connected
+        if (isConnected && this.orgId) {
+          fetch(this.getApiUrl('/api/whatsapp/register-default-route'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              organizationId: this.orgId,
+              clientId: defaultClientId,
+            }),
+          }).catch(() => {});
         }
 
         this.notify();
@@ -619,14 +678,129 @@ class DataStore {
       this.focusListenerCleanup();
       this.focusListenerCleanup = null;
     }
+    this.unsubscribeClientFirestore();
+  }
+
+  unsubscribeClientFirestore() {
+    if (this.conversationsUnsub) {
+      try { this.conversationsUnsub(); } catch {}
+      this.conversationsUnsub = null;
+    }
+    if (this.messagesUnsub) {
+      try { this.messagesUnsub(); } catch {}
+      this.messagesUnsub = null;
+    }
+  }
+
+  subscribeClientFirestore(orgId: string, clientId: string) {
+    this.unsubscribeClientFirestore();
+    if (!orgId || !clientId) return;
+
+    try {
+      // 1. Conversations real-time listener for current org and active client
+      const convQuery = query(
+        collection(db, 'conversations'),
+        where('organizationId', '==', orgId),
+        where('clientId', '==', clientId)
+      );
+
+      this.conversationsUnsub = onSnapshot(convQuery, (snapshot) => {
+        let changed = false;
+        snapshot.docChanges().forEach((change) => {
+          const docData = change.doc.data() as Conversation;
+          const idx = this.conversations.findIndex((c) => c.id === change.doc.id);
+
+          if (change.type === 'added') {
+            if (idx === -1) {
+              this.conversations.unshift(docData);
+              changed = true;
+            } else {
+              this.conversations[idx] = { ...this.conversations[idx], ...docData };
+              changed = true;
+            }
+          } else if (change.type === 'modified') {
+            if (idx !== -1) {
+              this.conversations[idx] = { ...this.conversations[idx], ...docData };
+              changed = true;
+            } else {
+              this.conversations.unshift(docData);
+              changed = true;
+            }
+          } else if (change.type === 'removed') {
+            if (idx !== -1) {
+              this.conversations.splice(idx, 1);
+              changed = true;
+            }
+          }
+        });
+
+        if (changed) {
+          this.notify();
+        }
+      }, (err) => {
+        console.warn('[DataStore] Conversations snapshot listener notice:', err?.message || err);
+      });
+
+      // 2. Messages real-time listener for current org and active client
+      const msgQuery = query(
+        collection(db, 'messages'),
+        where('organizationId', '==', orgId),
+        where('clientId', '==', clientId)
+      );
+
+      this.messagesUnsub = onSnapshot(msgQuery, (snapshot) => {
+        let changed = false;
+        snapshot.docChanges().forEach((change) => {
+          const docData = change.doc.data() as Message;
+          const idx = this.messages.findIndex((m) => m.id === change.doc.id);
+
+          if (change.type === 'added') {
+            if (idx === -1) {
+              this.messages.push(docData);
+              changed = true;
+            } else {
+              this.messages[idx] = { ...this.messages[idx], ...docData };
+              changed = true;
+            }
+          } else if (change.type === 'modified') {
+            if (idx !== -1) {
+              this.messages[idx] = { ...this.messages[idx], ...docData };
+              changed = true;
+            } else {
+              this.messages.push(docData);
+              changed = true;
+            }
+          } else if (change.type === 'removed') {
+            if (idx !== -1) {
+              this.messages.splice(idx, 1);
+              changed = true;
+            }
+          }
+        });
+
+        if (changed) {
+          this.notify();
+        }
+      }, (err) => {
+        console.warn('[DataStore] Messages snapshot listener notice:', err?.message || err);
+      });
+    } catch (err: any) {
+      console.warn('[DataStore] Error setting up client Firestore listeners:', err?.message || err);
+    }
   }
 
   public async pollEvents() {
     if (this.isPolling) return;
     this.isPolling = true;
     try {
-      const queryParam = this.lastEventSyncTimestamp ? `?since=${encodeURIComponent(this.lastEventSyncTimestamp)}` : '';
-      const res = await fetch(this.getApiUrl(`/api/whatsapp/events${queryParam}`));
+      const activeClient = this.activeClientId;
+      const lastCursor = activeClient ? (this.clientEventCursors.get(activeClient) || '') : '';
+      const params = new URLSearchParams();
+      if (lastCursor) params.append('since', lastCursor);
+      if (activeClient) params.append('clientId', activeClient);
+
+      const queryString = params.toString() ? `?${params.toString()}` : '';
+      const res = await fetch(this.getApiUrl(`/api/whatsapp/events${queryString}`));
       if (!res.ok) return;
       const data = await res.json();
       if (!data.success || !Array.isArray(data.events) || data.events.length === 0) return;
@@ -641,14 +815,19 @@ class DataStore {
           this.processedEventIds.add(event.id);
         }
 
-        if (!this.lastEventSyncTimestamp || event.timestamp > this.lastEventSyncTimestamp) {
-          this.lastEventSyncTimestamp = event.timestamp;
+        const eventTime = event.receivedAt || event.timestamp || event.eventTimestamp;
+        if (activeClient && eventTime) {
+          const currentClientCursor = this.clientEventCursors.get(activeClient) || '';
+          if (!currentClientCursor || eventTime > currentClientCursor) {
+            this.clientEventCursors.set(activeClient, eventTime);
+          }
         }
 
         if (event.type === 'status_update') {
           const { wamid, status, failureReason, eventTimestamp } = event.payload;
 
-          // 1. Update matching message with strict delivery progression
+          // 1. Update matching message in local store for fast UI response
+          // Notice: Local update only. Server webhook is authoritative writer.
           const msg = this.messages.find((m) => m.whatsappMessageId === wamid);
           if (msg) {
             const statusRank: Record<string, number> = {
@@ -673,7 +852,7 @@ class DataStore {
             }
           }
 
-          // 2. Update matching campaign recipient
+          // 2. Update matching campaign recipient in local store
           const rcp = this.campaignRecipients.find((r) => r.whatsappMessageId === wamid);
           if (rcp) {
             if (rcp.status !== 'read' || status === 'read') {
@@ -686,7 +865,7 @@ class DataStore {
               }
               changed = true;
 
-              // Recompute campaign aggregates
+              // Recompute campaign aggregates locally
               const cmp = this.campaigns.find((c) => c.id === rcp.campaignId);
               if (cmp) {
                 const recs = this.campaignRecipients.filter((r) => r.campaignId === cmp.id);
@@ -703,7 +882,7 @@ class DataStore {
             continue;
           }
 
-          const inboundClientId = this.getDefaultWhatsAppClientId();
+          const inboundClientId = event.clientId || this.getDefaultWhatsAppClientId();
 
           let contact = this.contacts.find((c) => c.clientId === inboundClientId && arePhoneNumbersEqual(c.phone, fromPhone));
           if (!contact) {
@@ -743,20 +922,17 @@ class DataStore {
               createdAt: timestamp,
             };
             this.conversations.unshift(conv);
-            this.persistDoc('conversations', conv.id, conv);
             this.logAudit('Inbound Conversation Created', 'Conversation', conv.id, { contactPhone: fromPhone }, inboundClientId);
           } else {
             conv.lastMessage = text;
             conv.lastMessageAt = timestamp;
             conv.lastIncomingMessageAt = timestamp;
-            // If message arrives for the conversation currently open in the Inbox, keep unread at 0
             if (isCurrentlyActive) {
               conv.unreadCount = 0;
             } else {
               conv.unreadCount = (conv.unreadCount || 0) + 1;
             }
             conv.status = 'Open';
-            this.persistDoc('conversations', conv.id, conv);
           }
 
           const inMsg: Message = {
@@ -776,13 +952,10 @@ class DataStore {
             isDemo: false,
           };
           this.messages.push(inMsg);
-          this.persistDoc('messages', inMsg.id, inMsg);
           this.logAudit('Inbound Message Received', 'Message', inMsg.id, { from: fromPhone, wamid }, inboundClientId);
           changed = true;
 
           if (consentEvaluation?.isOptOutCommand) {
-            // Note: updateContact already invokes logConsentChange and logAudit with contact's clientId.
-            // Do not call logConsentChange here to prevent duplicate consent records for one STOP event.
             this.updateContact(contact.id, {
               optOut: true,
               status: 'Opted Out',
@@ -808,12 +981,10 @@ class DataStore {
               isDemo: false,
             };
             this.messages.push(outMsg);
-            this.persistDoc('messages', outMsg.id, outMsg);
             this.logAudit('Inbound Auto-Reply Sent', 'Message', outMsg.id, { to: fromPhone }, inboundClientId);
             conv.lastMessage = autoReplySent;
             conv.lastMessageAt = outMsg.timestamp;
             conv.lastOutgoingMessageAt = outMsg.timestamp;
-            this.persistDoc('conversations', conv.id, conv);
           }
         }
       }
@@ -835,7 +1006,11 @@ class DataStore {
       await fetch('/api/whatsapp/sync-rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rules: rulesToSync }),
+        body: JSON.stringify({
+          rules: rulesToSync,
+          organizationId: this.orgId,
+          clientId: defaultClientId,
+        }),
       });
     } catch {}
   }
@@ -1091,10 +1266,12 @@ class DataStore {
 
     const clientId = sanitized.clientId || this.requireActiveClientId();
     const id = `cnt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const normalizedPhone = norm.isValid ? norm.normalized : (cleanPhone.startsWith('+') ? cleanPhone : `+${cleanPhone.replace(/\D/g, '')}`);
     const newContact: Contact = {
       ...sanitized,
       id,
       phone: cleanPhone,
+      normalizedPhone,
       organizationId: this.orgId,
       clientId,
       createdAt: new Date().toISOString(),
@@ -1584,6 +1761,7 @@ class DataStore {
           sentAt: rcp.sentAt,
         };
         this.campaignRecipients.unshift(recipientRecord);
+        this.persistDoc('campaign_recipients', recipientRecord.id, recipientRecord);
 
         if (rcp.status === 'sent') {
           let conv = this.conversations.find(
@@ -1596,6 +1774,7 @@ class DataStore {
               clientId,
               contactId: rcp.contactId,
               contactPhone: rcp.phone,
+              normalizedPhone: rcp.normalizedPhone,
               contactName: rcp.contactName,
               lastMessage: rcp.personalizedBody,
               lastMessageAt: new Date().toISOString(),
@@ -1610,6 +1789,7 @@ class DataStore {
             conv.lastMessageAt = new Date().toISOString();
             conv.lastOutgoingMessageAt = new Date().toISOString();
           }
+          this.persistDoc('conversations', conv.id, conv);
 
           const msg: Message = {
             id: `msg_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1629,6 +1809,7 @@ class DataStore {
             isDemo: false,
           };
           this.messages.push(msg);
+          this.persistDoc('messages', msg.id, msg);
         }
       });
 
@@ -1722,6 +1903,7 @@ class DataStore {
         readAt: isRead ? new Date(Date.now() + 3000).toISOString() : undefined,
       };
       this.campaignRecipients.unshift(recipientRecord);
+      this.persistDoc('campaign_recipients', recipientRecord.id, recipientRecord);
 
       // 2. Create or update Inbox conversation
       let conv = this.conversations.find(
@@ -1735,6 +1917,7 @@ class DataStore {
           clientId,
           contactId: c.id,
           contactPhone: c.phone,
+          normalizedPhone: normalizePhoneNumber(c.phone).normalized || c.phone,
           contactName: `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.phone,
           lastMessage: renderedBody,
           lastMessageAt: new Date().toISOString(),
@@ -1742,14 +1925,18 @@ class DataStore {
           unreadCount: 0,
           status: 'Closed', // Broadcast dispatch does not prematurely mark conversation as Open
           createdAt: new Date().toISOString(),
+          isDemo: isDemoMode,
         };
         this.conversations.unshift(conv);
       } else {
         conv.lastMessage = renderedBody;
         conv.lastMessageAt = new Date().toISOString();
         conv.lastOutgoingMessageAt = new Date().toISOString();
-        // Preserve conv.status and unreadCount
+        if (conv.normalizedPhone === undefined) {
+          conv.normalizedPhone = normalizePhoneNumber(c.phone).normalized || c.phone;
+        }
       }
+      this.persistDoc('conversations', conv.id, conv);
 
       // 3. Create message record with renderedBody
       const msg: Message = {
@@ -1766,8 +1953,10 @@ class DataStore {
         status: isRead ? 'Read' : 'Delivered',
         timestamp: new Date().toISOString(),
         createdAt: new Date().toISOString(),
+        isDemo: isDemoMode,
       };
       this.messages.push(msg);
+      this.persistDoc('messages', msg.id, msg);
     });
 
     this.campaigns.unshift(campaign);
