@@ -78,28 +78,166 @@ class EncryptedMemoryCredentialStore implements CredentialStore {
   }
 }
 
+import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+
 /**
- * Google Secret Manager Adapter Skeleton
- * Ready to bind to `@google-cloud/secret-manager` in Google Cloud environments.
+ * Google Secret Manager Production Provider
+ * Uses Google Cloud Secret Manager client in production Cloud Run environments.
+ * Strictly uses Secret Manager in production with deterministic secret IDs:
+ * secretReference = `secret_conn_${organizationId}_${clientId}`
+ * Falls back to EncryptedMemoryCredentialStore only in AI Studio / local preview.
+ * Production NEVER falls back silently to memory.
  */
 export class GoogleSecretManagerStore implements CredentialStore {
   private fallbackStore: CredentialStore;
+  private client: SecretManagerServiceClient | null = null;
+  private projectId: string;
 
   constructor(fallback: CredentialStore) {
     this.fallbackStore = fallback;
+    this.projectId =
+      process.env.GOOGLE_CLOUD_PROJECT ||
+      process.env.GCP_PROJECT ||
+      'gen-lang-client-0579605586';
+
+    if (isProduction) {
+      try {
+        this.client = new SecretManagerServiceClient();
+        console.log(`[GoogleSecretManagerStore] Initialized SecretManagerServiceClient for project: ${this.projectId}`);
+      } catch (err: any) {
+        console.error('[GoogleSecretManagerStore] Failed to initialize SecretManagerServiceClient in production:', err);
+      }
+    }
+  }
+
+  /**
+   * Sanitizes the secretReference to conform to GCP Secret Manager secretId rules:
+   * 1-255 characters, characters [a-zA-Z0-9_-].
+   */
+  private formatSecretId(secretReference: string): string {
+    return secretReference.replace(/[^a-zA-Z0-9_-]/g, '_');
   }
 
   async storeSecret(secretReference: string, secretValue: string): Promise<void> {
-    // In environments with GCP Secret Manager IAM credentials, this persists to secretmanager.googleapis.com
-    // For AI Studio sandbox / preview runtime, safely uses the authenticated encrypted store
+    if (isProduction) {
+      if (!this.client) {
+        this.client = new SecretManagerServiceClient();
+      }
+
+      const secretId = this.formatSecretId(secretReference);
+      const parent = `projects/${this.projectId}`;
+      const secretName = `${parent}/secrets/${secretId}`;
+
+      try {
+        // 1. Ensure secret metadata resource exists
+        try {
+          await this.client.getSecret({ name: secretName });
+        } catch (err: any) {
+          // If secret not found (404 / NOT_FOUND code 5), create it
+          if (err?.code === 5 || String(err?.message || '').includes('NOT_FOUND')) {
+            console.log(`[GoogleSecretManager] Creating secret: ${secretName}`);
+            await this.client.createSecret({
+              parent,
+              secretId,
+              secret: {
+                replication: {
+                  automatic: {},
+                },
+                labels: {
+                  managed_by: 'watsmanager',
+                },
+              },
+            });
+          } else {
+            throw err;
+          }
+        }
+
+        // 2. Add secret version containing the token payload
+        const payload = Buffer.from(secretValue, 'utf8');
+        await this.client.addSecretVersion({
+          parent: secretName,
+          payload: {
+            data: payload,
+          },
+        });
+
+        console.log(`[GoogleSecretManager] Secret version successfully added for: ${secretId}`);
+        return;
+      } catch (err: any) {
+        console.error(`[GoogleSecretManager] Failed to store secret "${secretReference}" in production:`, err);
+        throw new Error(`Google Secret Manager storage failed: ${err?.message || 'Unknown error'}`);
+      }
+    }
+
+    // In AI Studio / local preview only: use encrypted in-memory fallback
     await this.fallbackStore.storeSecret(secretReference, secretValue);
   }
 
   async getSecret(secretReference: string): Promise<string | null> {
+    if (isProduction) {
+      if (!this.client) {
+        this.client = new SecretManagerServiceClient();
+      }
+
+      const secretId = this.formatSecretId(secretReference);
+      const versionName = `projects/${this.projectId}/secrets/${secretId}/versions/latest`;
+
+      try {
+        const [version] = await this.client.accessSecretVersion({
+          name: versionName,
+        });
+
+        const dataBuffer = version.payload?.data;
+        if (!dataBuffer) {
+          console.warn(`[GoogleSecretManager] Secret version payload empty for: ${secretId}`);
+          return null;
+        }
+
+        const secretValue = typeof dataBuffer === 'string'
+          ? dataBuffer
+          : Buffer.from(dataBuffer).toString('utf8');
+
+        return secretValue;
+      } catch (err: any) {
+        // If not found, return null cleanly
+        if (err?.code === 5 || String(err?.message || '').includes('NOT_FOUND')) {
+          console.warn(`[GoogleSecretManager] Secret not found in Secret Manager: ${secretId}`);
+          return null;
+        }
+        console.error(`[GoogleSecretManager] Error accessing secret "${secretReference}" in production:`, err);
+        throw new Error(`Google Secret Manager access failed: ${err?.message || 'Unknown error'}`);
+      }
+    }
+
+    // In AI Studio / local preview only: use encrypted in-memory fallback
     return this.fallbackStore.getSecret(secretReference);
   }
 
   async deleteSecret(secretReference: string): Promise<void> {
+    if (isProduction) {
+      if (!this.client) {
+        this.client = new SecretManagerServiceClient();
+      }
+
+      const secretId = this.formatSecretId(secretReference);
+      const secretName = `projects/${this.projectId}/secrets/${secretId}`;
+
+      try {
+        await this.client.deleteSecret({
+          name: secretName,
+        });
+        console.log(`[GoogleSecretManager] Secret deleted: ${secretName}`);
+        return;
+      } catch (err: any) {
+        if (err?.code === 5 || String(err?.message || '').includes('NOT_FOUND')) {
+          return;
+        }
+        console.error(`[GoogleSecretManager] Error deleting secret "${secretReference}" in production:`, err);
+        throw err;
+      }
+    }
+
     await this.fallbackStore.deleteSecret(secretReference);
   }
 }

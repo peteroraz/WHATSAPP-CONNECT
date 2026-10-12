@@ -11,7 +11,7 @@ import { evaluateAutomationRules } from './automationRunner.ts';
 import { whatsappDataRepository, normalizeE164 } from './whatsappDataRepository.ts';
 import { isProduction } from './firebaseAdmin.ts';
 import type { AutomationRule, MessageTemplate } from '../types/index.ts';
-import type { ResolvedWhatsAppCredentials } from './credentialStore.ts';
+import { getWhatsAppConnection, type ResolvedWhatsAppCredentials } from './credentialStore.ts';
 
 export interface WhatsAppConfigStatus {
   configured: boolean;
@@ -960,6 +960,22 @@ export class WhatsAppService {
       return;
     }
 
+    // 3b. Resolve inbound connection for outbound replies
+    const inboundConnection = await getWhatsAppConnection(
+      route.clientId,
+      route.organizationId
+    );
+
+    // For a non-default Client, if the connection cannot be resolved, do not fall back to the Default Client sender
+    const isDefaultClient = !route.clientId || route.clientId.startsWith('client_default_');
+    const canSendReplies = Boolean(inboundConnection) || isDefaultClient;
+
+    if (!canSendReplies) {
+      console.warn(
+        `[WhatsAppService] Inbound client ${route.clientId} does not have a resolvable WhatsApp connection. Skipping automated outbound reply.`
+      );
+    }
+
     const conversationId = txResult.conversationId;
 
     // 4. Opt-out / Opt-in Command Processing (runs BEFORE normal automations)
@@ -981,10 +997,11 @@ export class WhatsAppService {
         });
 
         // Trigger opt-out confirmation message
-        if (consentEvaluation.suggestedReply) {
+        if (consentEvaluation.suggestedReply && canSendReplies) {
           const replyResult = await this.sendTextMessage({
             to: senderPhone,
             body: consentEvaluation.suggestedReply,
+            connection: inboundConnection || undefined,
           });
           if (replyResult.success) {
             autoReplySent = consentEvaluation.suggestedReply;
@@ -1016,10 +1033,11 @@ export class WhatsAppService {
           wamid,
         });
 
-        if (consentEvaluation.suggestedReply) {
+        if (consentEvaluation.suggestedReply && canSendReplies) {
           const replyResult = await this.sendTextMessage({
             to: senderPhone,
             body: consentEvaluation.suggestedReply,
+            connection: inboundConnection || undefined,
           });
           if (replyResult.success) {
             autoReplySent = consentEvaluation.suggestedReply;
@@ -1054,7 +1072,7 @@ export class WhatsAppService {
           route.clientId
         );
 
-        if (activeRules.length > 0) {
+        if (activeRules.length > 0 && canSendReplies) {
           const match = evaluateAutomationRules(activeRules, {
             messageBody: textBody,
             isFirstMessage: contact.isNew,
@@ -1066,6 +1084,7 @@ export class WhatsAppService {
               const autoRes = await this.sendTextMessage({
                 to: senderPhone,
                 body: match.responseBody,
+                connection: inboundConnection || undefined,
               });
               if (autoRes.success) {
                 autoReplySent = match.responseBody;
@@ -1088,6 +1107,7 @@ export class WhatsAppService {
               const autoRes = await this.sendTemplateMessage({
                 to: senderPhone,
                 templateName: match.templateId,
+                connection: inboundConnection || undefined,
               });
               if (autoRes.success) {
                 autoReplySent = `[Template: ${match.templateId}]`;
