@@ -1,27 +1,28 @@
-import React, { useState, useMemo } from 'react';
-import { 
-  Plus, 
-  UploadCloud, 
-  FolderPlus, 
-  Search, 
-  Filter, 
-  Trash2, 
-  Edit, 
-  ShieldCheck, 
-  ShieldAlert, 
-  CheckSquare, 
-  Square,
-  Users,
+import React, { useMemo, useState } from 'react';
+import {
+  CheckSquare,
   ChevronLeft,
   ChevronRight,
-  Info
+  Edit,
+  FolderPlus,
+  MessageCircle,
+  Plus,
+  Search,
+  Send,
+  ShieldAlert,
+  ShieldCheck,
+  Square,
+  Trash2,
+  UploadCloud,
+  Users,
 } from 'lucide-react';
-import { Contact, ContactGroup, OptInHistoryEvent } from '../../types/index.ts';
+import type { Contact, ContactGroup, OptInHistoryEvent } from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { AddContactModal } from './AddContactModal.tsx';
 import { ImportContactsModal } from './ImportContactsModal.tsx';
 import { GroupsModal } from './GroupsModal.tsx';
 import { ConsentDetailsModal } from './ConsentDetailsModal.tsx';
+import { ContactMessagingModal } from './ContactMessagingModal.tsx';
 import { EmptyState } from '../common/EmptyState.tsx';
 import { useToast } from '../common/Toast.tsx';
 import { getContactDisplayName } from '../../utils/phoneUtils.ts';
@@ -56,96 +57,106 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
   onDeleteGroup,
 }) => {
   const { toast } = useToast();
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedGroupFilter, setSelectedGroupFilter] = useState('ALL');
   const [selectedOptInFilter, setSelectedOptInFilter] = useState('ALL');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState('ALL');
-
   const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
-  const pageSize = 10;
+  const [bulkGroupTarget, setBulkGroupTarget] = useState('');
 
-  // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [contactToEdit, setContactToEdit] = useState<Contact | null>(null);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const [consentModalContact, setConsentModalContact] = useState<Contact | null>(null);
+  const [messagingContacts, setMessagingContacts] = useState<Contact[]>([]);
 
-  // Bulk actions state
-  const [bulkGroupTarget, setBulkGroupTarget] = useState('');
+  const pageSize = 10;
 
-  // Filter logic
   const filteredContacts = useMemo(() => {
-    return contacts.filter((c) => {
-      // Search across clean fields
+    return contacts.filter((contact) => {
       if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const displayName = getContactDisplayName(c).toLowerCase();
-        const matchesName = displayName.includes(q);
-        const matchesPhone = c.phone.toLowerCase().includes(q);
-        const matchesEmail = (c.email || '').toLowerCase().includes(q);
-        const matchesCompany = (c.company || '').toLowerCase().includes(q);
-        if (!matchesName && !matchesPhone && !matchesEmail && !matchesCompany) {
-          return false;
-        }
+        const query = searchQuery.toLowerCase();
+        const customValues = Object.values(contact.customFields || {})
+          .join(' ')
+          .toLowerCase();
+
+        const searchable = [
+          getContactDisplayName(contact),
+          contact.phone,
+          contact.email || '',
+          contact.company || '',
+          customValues,
+        ]
+          .join(' ')
+          .toLowerCase();
+
+        if (!searchable.includes(query)) return false;
       }
 
-      // Group filter
-      if (selectedGroupFilter !== 'ALL') {
-        if (!c.groups || !c.groups.includes(selectedGroupFilter)) {
-          return false;
-        }
+      if (
+        selectedGroupFilter !== 'ALL' &&
+        (!contact.groups || !contact.groups.includes(selectedGroupFilter))
+      ) {
+        return false;
       }
 
-      // Opt-in filter: Marketing Consented, Transactional Only, Not Consented, Opted Out
       if (selectedOptInFilter === 'MARKETING_CONSENTED') {
-        if (!c.marketingOptIn || c.optOut) return false;
+        if (!contact.marketingOptIn || contact.optOut) return false;
       } else if (selectedOptInFilter === 'TRANSACTIONAL_ONLY') {
-        if (c.optOut || c.marketingOptIn || !c.transactionalOptIn) return false;
+        if (contact.optOut || contact.marketingOptIn || !contact.transactionalOptIn) return false;
       } else if (selectedOptInFilter === 'NOT_CONSENTED') {
-        if (c.optOut || c.marketingOptIn || c.transactionalOptIn) return false;
+        if (contact.optOut || contact.marketingOptIn || contact.transactionalOptIn) return false;
       } else if (selectedOptInFilter === 'OPTED_OUT') {
-        if (!c.optOut) return false;
+        if (!contact.optOut) return false;
       }
 
-      // Status filter: Active, Invalid, Blocked, Opted Out
-      if (selectedStatusFilter !== 'ALL') {
-        if (c.status !== selectedStatusFilter) return false;
+      if (selectedStatusFilter !== 'ALL' && contact.status !== selectedStatusFilter) {
+        return false;
       }
 
       return true;
     });
-  }, [contacts, searchQuery, selectedGroupFilter, selectedOptInFilter, selectedStatusFilter]);
+  }, [
+    contacts,
+    searchQuery,
+    selectedGroupFilter,
+    selectedOptInFilter,
+    selectedStatusFilter,
+  ]);
 
-  // Pagination
-  const totalPages = Math.ceil(filteredContacts.length / pageSize) || 1;
+  const totalPages = Math.max(1, Math.ceil(filteredContacts.length / pageSize));
   const paginatedContacts = filteredContacts.slice(
     (currentPage - 1) * pageSize,
     currentPage * pageSize
   );
 
-  // Selection helpers
+  const selectedContacts = contacts.filter((contact) =>
+    selectedContactIds.includes(contact.id)
+  );
+
   const allCurrentPageSelected =
     paginatedContacts.length > 0 &&
-    paginatedContacts.every((c) => selectedContactIds.includes(c.id));
+    paginatedContacts.every((contact) => selectedContactIds.includes(contact.id));
 
   const toggleSelectAllPage = () => {
     if (allCurrentPageSelected) {
-      const pageIds = new Set(paginatedContacts.map((c) => c.id));
-      setSelectedContactIds(selectedContactIds.filter((id) => !pageIds.has(id)));
-    } else {
-      const newSelected = new Set([...selectedContactIds, ...paginatedContacts.map((c) => c.id)]);
-      setSelectedContactIds(Array.from(newSelected));
+      const pageIds = new Set(paginatedContacts.map((contact) => contact.id));
+      setSelectedContactIds((current) => current.filter((id) => !pageIds.has(id)));
+      return;
     }
+
+    setSelectedContactIds((current) =>
+      Array.from(new Set([...current, ...paginatedContacts.map((contact) => contact.id)]))
+    );
   };
 
   const toggleSelectContact = (id: string) => {
-    if (selectedContactIds.includes(id)) {
-      setSelectedContactIds(selectedContactIds.filter((x) => x !== id));
-    } else {
-      setSelectedContactIds([...selectedContactIds, id]);
-    }
+    setSelectedContactIds((current) =>
+      current.includes(id) ? current.filter((value) => value !== id) : [...current, id]
+    );
   };
 
   const handleBulkAddToGroup = () => {
@@ -164,62 +175,62 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
     setSelectedContactIds([]);
   };
 
-  const handleOptOutContact = (c: Contact) => {
-    onUpdateContact(c.id, { 
-      optOut: true, 
-      marketingOptIn: false, 
+  const handleOptOutContact = (contact: Contact) => {
+    onUpdateContact(contact.id, {
+      optOut: true,
+      marketingOptIn: false,
       transactionalOptIn: false,
       optOutDate: new Date().toISOString(),
       optOutSource: 'Agent Manual Opt-Out',
-      status: 'Opted Out' 
+      status: 'Opted Out',
     });
-    toast(`${getContactDisplayName(c)} has been opted out of marketing campaigns.`);
+    toast(`${getContactDisplayName(contact)} has been opted out.`);
   };
 
   const handleResubscribeContact = (contactId: string) => {
-    onUpdateContact(contactId, { 
-      optOut: false, 
-      marketingOptIn: true, 
+    onUpdateContact(contactId, {
+      optOut: false,
+      marketingOptIn: true,
       transactionalOptIn: true,
       optInDate: new Date().toISOString(),
       optInSource: 'Agent Resubscribe',
       consentNotes: 'Customer explicitly requested resubscription',
-      status: 'Active' 
+      status: 'Active',
     });
     toast('Contact resubscribed with explicit customer consent.');
   };
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Header Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-slate-900">Audience & Contacts</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Clean contact directory, E.164 phone validation, and WhatsApp opt-in consent compliance.
+            Manage contacts, consent, one-to-one WhatsApp conversations and quick broadcasts.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Manage Groups displays the exact count of actual groups */}
           <button
             id="open-groups-modal-btn"
             type="button"
             onClick={() => setIsGroupsModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200 shadow-2xs transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200"
           >
-            <FolderPlus className="w-3.5 h-3.5 text-slate-500" />
+            <FolderPlus className="w-3.5 h-3.5" />
             Manage Groups ({groups.length})
           </button>
+
           <button
             id="open-import-modal-btn"
             type="button"
             onClick={() => setIsImportModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200 shadow-2xs transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200"
           >
-            <UploadCloud className="w-3.5 h-3.5 text-slate-500" />
-            Import CSV
+            <UploadCloud className="w-3.5 h-3.5" />
+            Import Contacts
           </button>
+
           <button
             id="open-add-contact-modal-btn"
             type="button"
@@ -227,7 +238,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
               setContactToEdit(null);
               setIsAddModalOpen(true);
             }}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg"
           >
             <Plus className="w-3.5 h-3.5" />
             Add Contact
@@ -235,87 +246,73 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         </div>
       </div>
 
-      {/* Filter and Search Bar */}
       <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {/* Search box */}
-          <div>
-            <div className="relative">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-              <input
-                id="contacts-search-input"
-                type="text"
-                value={searchQuery}
-                onChange={(e) => {
-                  setSearchQuery(e.target.value);
-                  setCurrentPage(1);
-                }}
-                placeholder="Search name, phone, email, or company..."
-                className="w-full pl-9 pr-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50/50 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-              />
-            </div>
-          </div>
-
-          {/* Group dropdown - displays exact groups count matching Manage Groups */}
-          <div>
-            <select
-              id="filter-group-select"
-              value={selectedGroupFilter}
-              onChange={(e) => {
-                setSelectedGroupFilter(e.target.value);
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <input
+              id="contacts-search-input"
+              type="text"
+              value={searchQuery}
+              onChange={(event) => {
+                setSearchQuery(event.target.value);
                 setCurrentPage(1);
               }}
-              className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 font-medium"
-            >
-              <option value="ALL">All Groups ({groups.length})</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.name}>
-                  {g.name}
-                </option>
-              ))}
-            </select>
+              placeholder="Search contacts or custom fields..."
+              className="w-full pl-9 pr-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50/50 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+            />
           </div>
 
-          {/* Opt-in filter */}
-          <div>
-            <select
-              id="filter-optin-select"
-              value={selectedOptInFilter}
-              onChange={(e) => {
-                setSelectedOptInFilter(e.target.value);
-                setCurrentPage(1);
-              }}
-              className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 font-medium"
-            >
-              <option value="ALL">All Opt-In Statuses</option>
-              <option value="MARKETING_CONSENTED">Marketing Consented</option>
-              <option value="TRANSACTIONAL_ONLY">Transactional Only</option>
-              <option value="NOT_CONSENTED">Not Consented</option>
-              <option value="OPTED_OUT">Opted Out</option>
-            </select>
-          </div>
+          <select
+            id="filter-group-select"
+            value={selectedGroupFilter}
+            onChange={(event) => {
+              setSelectedGroupFilter(event.target.value);
+              setCurrentPage(1);
+            }}
+            className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+          >
+            <option value="ALL">All Groups ({groups.length})</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.name}>
+                {group.name}
+              </option>
+            ))}
+          </select>
 
-          {/* Status filter */}
-          <div>
-            <select
-              id="filter-status-select"
-              value={selectedStatusFilter}
-              onChange={(e) => {
-                setSelectedStatusFilter(e.target.value);
-                setCurrentPage(1);
-              }}
-              className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 font-medium"
-            >
-              <option value="ALL">All Statuses</option>
-              <option value="Active">Active</option>
-              <option value="Opted Out">Opted Out</option>
-              <option value="Invalid">Invalid</option>
-              <option value="Blocked">Blocked</option>
-            </select>
-          </div>
+          <select
+            id="filter-optin-select"
+            value={selectedOptInFilter}
+            onChange={(event) => {
+              setSelectedOptInFilter(event.target.value);
+              setCurrentPage(1);
+            }}
+            className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+          >
+            <option value="ALL">All Opt-In Statuses</option>
+            <option value="MARKETING_CONSENTED">Marketing Consented</option>
+            <option value="TRANSACTIONAL_ONLY">Transactional Only</option>
+            <option value="NOT_CONSENTED">Not Consented</option>
+            <option value="OPTED_OUT">Opted Out</option>
+          </select>
+
+          <select
+            id="filter-status-select"
+            value={selectedStatusFilter}
+            onChange={(event) => {
+              setSelectedStatusFilter(event.target.value);
+              setCurrentPage(1);
+            }}
+            className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+          >
+            <option value="ALL">All Statuses</option>
+            <option value="Active">Active</option>
+            <option value="Opted Out">Opted Out</option>
+            <option value="Invalid">Invalid</option>
+            <option value="Blocked">Blocked</option>
+          </select>
         </div>
 
-        {/* Bulk Actions Panel if items selected */}
         {selectedContactIds.length > 0 && (
           <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs">
             <div className="font-semibold text-emerald-900 flex items-center gap-2">
@@ -329,17 +326,27 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
               </button>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                id="bulk-send-whatsapp-btn"
+                type="button"
+                onClick={() => setMessagingContacts(selectedContacts)}
+                className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-md font-semibold inline-flex items-center gap-1.5"
+              >
+                <Send className="w-3.5 h-3.5" />
+                Send WhatsApp
+              </button>
+
               <select
                 id="bulk-group-select"
                 value={bulkGroupTarget}
-                onChange={(e) => setBulkGroupTarget(e.target.value)}
-                className="px-2.5 py-1 bg-white border border-emerald-300 rounded-md text-xs font-medium text-slate-700"
+                onChange={(event) => setBulkGroupTarget(event.target.value)}
+                className="px-2.5 py-1.5 bg-white border border-emerald-300 rounded-md text-xs"
               >
                 <option value="">-- Choose Group --</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.name}>
-                    {g.name}
+                {groups.map((group) => (
+                  <option key={group.id} value={group.name}>
+                    {group.name}
                   </option>
                 ))}
               </select>
@@ -349,7 +356,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                 type="button"
                 disabled={!bulkGroupTarget}
                 onClick={handleBulkAddToGroup}
-                className="px-3 py-1 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-md font-semibold transition-colors"
+                className="px-3 py-1.5 bg-white text-emerald-800 border border-emerald-300 disabled:opacity-50 rounded-md font-semibold"
               >
                 Add to Group
               </button>
@@ -359,7 +366,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                 type="button"
                 disabled={!bulkGroupTarget}
                 onClick={handleBulkRemoveFromGroup}
-                className="px-3 py-1 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 disabled:opacity-50 rounded-md font-semibold transition-colors"
+                className="px-3 py-1.5 bg-white text-rose-700 border border-rose-200 disabled:opacity-50 rounded-md font-semibold"
               >
                 Remove from Group
               </button>
@@ -368,13 +375,12 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         )}
       </div>
 
-      {/* Contacts Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
         {contacts.length === 0 ? (
           <EmptyState
             icon={Users}
             title="No contacts yet"
-            description="Add a contact or import a CSV to populate your audience."
+            description="Add a contact or import a contact file to populate your audience."
             actionLabel="Add First Contact"
             onAction={() => {
               setContactToEdit(null);
@@ -395,12 +401,11 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                       id="select-all-page-btn"
                       type="button"
                       onClick={toggleSelectAllPage}
-                      className="text-slate-400 hover:text-slate-600 flex items-center"
                     >
                       {allCurrentPageSelected ? (
                         <CheckSquare className="w-4 h-4 text-emerald-600" />
                       ) : (
-                        <Square className="w-4 h-4" />
+                        <Square className="w-4 h-4 text-slate-400" />
                       )}
                     </button>
                   </th>
@@ -413,63 +418,64 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
               </thead>
+
               <tbody className="divide-y divide-slate-100">
-                {paginatedContacts.map((c) => {
-                  const isSelected = selectedContactIds.includes(c.id);
-                  const displayName = getContactDisplayName(c);
+                {paginatedContacts.map((contact) => {
+                  const selected = selectedContactIds.includes(contact.id);
+                  const displayName = getContactDisplayName(contact);
 
                   return (
                     <tr
-                      key={c.id}
-                      className={`hover:bg-slate-50/75 transition-colors ${
-                        isSelected ? 'bg-emerald-50/30' : ''
+                      key={contact.id}
+                      className={`hover:bg-slate-50/75 ${
+                        selected ? 'bg-emerald-50/30' : ''
                       }`}
                     >
-                      {/* Checkbox */}
                       <td className="py-3.5 px-4">
                         <button
                           type="button"
-                          onClick={() => toggleSelectContact(c.id)}
-                          className="text-slate-400 hover:text-slate-600 flex items-center"
+                          onClick={() => toggleSelectContact(contact.id)}
                         >
-                          {isSelected ? (
+                          {selected ? (
                             <CheckSquare className="w-4 h-4 text-emerald-600" />
                           ) : (
-                            <Square className="w-4 h-4" />
+                            <Square className="w-4 h-4 text-slate-400" />
                           )}
                         </button>
                       </td>
 
-                      {/* Contact Column: Full Name, email underneath if available */}
                       <td className="py-3.5 px-4 font-semibold text-slate-900">
                         <div>{displayName}</div>
-                        {c.email && (
-                          <div className="text-[11px] text-slate-400 font-normal truncate max-w-[200px]">
-                            {c.email}
+                        {contact.email && (
+                          <div className="text-[11px] text-slate-400 font-normal">
+                            {contact.email}
                           </div>
                         )}
+                        {contact.customFields &&
+                          Object.keys(contact.customFields).length > 0 && (
+                            <div className="text-[10px] text-slate-400 font-normal mt-0.5">
+                              Custom fields: {Object.keys(contact.customFields).length}
+                            </div>
+                          )}
                       </td>
 
-                      {/* Phone Column: normalized international phone */}
                       <td className="py-3.5 px-4 font-mono font-medium text-slate-800">
-                        {c.phone}
+                        {contact.phone}
                       </td>
 
-                      {/* Company: company only */}
                       <td className="py-3.5 px-4 text-slate-600">
-                        {c.company || '—'}
+                        {contact.company || '—'}
                       </td>
 
-                      {/* Groups badges */}
                       <td className="py-3.5 px-4">
                         <div className="flex flex-wrap gap-1">
-                          {c.groups && c.groups.length > 0 ? (
-                            c.groups.map((grp) => (
+                          {contact.groups?.length ? (
+                            contact.groups.map((group) => (
                               <span
-                                key={grp}
-                                className="bg-slate-100 text-slate-700 text-[10px] font-medium px-2 py-0.5 rounded-sm"
+                                key={group}
+                                className="bg-slate-100 text-slate-700 text-[10px] px-2 py-0.5 rounded-sm"
                               >
-                                {grp}
+                                {group}
                               </span>
                             ))
                           ) : (
@@ -478,90 +484,81 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                         </div>
                       </td>
 
-                      {/* Opt-In Status: Marketing Consented | Transactional Only | Not Consented | Opted Out */}
                       <td className="py-3.5 px-4">
-                        {c.optOut ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] text-rose-700 font-semibold bg-rose-50 px-2 py-0.5 rounded-sm border border-rose-100">
-                            <ShieldAlert className="w-3.5 h-3.5 text-rose-600" />
+                        {contact.optOut ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-rose-700 font-semibold bg-rose-50 px-2 py-0.5 rounded-sm">
+                            <ShieldAlert className="w-3.5 h-3.5" />
                             Opted Out
                           </span>
-                        ) : c.marketingOptIn ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-sm border border-emerald-100">
-                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : contact.marketingOptIn ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-sm">
+                            <ShieldCheck className="w-3.5 h-3.5" />
                             Marketing Consented
                           </span>
-                        ) : c.transactionalOptIn ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] text-blue-700 font-semibold bg-blue-50 px-2 py-0.5 rounded-sm border border-blue-100">
+                        ) : contact.transactionalOptIn ? (
+                          <span className="inline-flex items-center text-[11px] text-blue-700 font-semibold bg-blue-50 px-2 py-0.5 rounded-sm">
                             Transactional Only
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 text-[11px] text-slate-600 font-semibold bg-slate-100 px-2 py-0.5 rounded-sm">
+                          <span className="inline-flex items-center text-[11px] text-slate-600 font-semibold bg-slate-100 px-2 py-0.5 rounded-sm">
                             Not Consented
                           </span>
                         )}
                       </td>
 
-                      {/* Status: Active | Invalid | Blocked (or Opted Out) */}
                       <td className="py-3.5 px-4">
                         <Badge
                           variant={
-                            c.status === 'Active'
+                            contact.status === 'Active'
                               ? 'emerald'
-                              : c.status === 'Opted Out'
+                              : contact.status === 'Opted Out'
                               ? 'amber'
-                              : c.status === 'Blocked'
+                              : contact.status === 'Blocked'
                               ? 'slate'
                               : 'rose'
                           }
                         >
-                          {c.status}
+                          {contact.status}
                         </Badge>
                       </td>
 
-                      {/* Actions: Context-aware Opt-out / Consent history / Consent details */}
-                      <td className="py-3.5 px-4 text-right">
+                      <td className="py-3.5 px-4">
                         <div className="flex items-center justify-end gap-1.5">
-                          {/* Context-aware opt action:
-                              - Marketing Consented -> Opt Out button
-                              - Opted Out -> View Consent History
-                              - Transactional Only / Not Consented -> Consent Details
-                          */}
-                          {c.marketingOptIn && !c.optOut ? (
+                          <button
+                            type="button"
+                            onClick={() => setMessagingContacts([contact])}
+                            className="px-2 py-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md inline-flex items-center gap-1"
+                            title="Message on WhatsApp"
+                          >
+                            <MessageCircle className="w-3.5 h-3.5" />
+                            Message
+                          </button>
+
+                          {contact.marketingOptIn && !contact.optOut ? (
                             <button
                               type="button"
-                              onClick={() => handleOptOutContact(c)}
-                              className="px-2 py-1 text-[11px] font-semibold text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition-colors"
-                              title="Opt-Out from marketing broadcasts"
+                              onClick={() => handleOptOutContact(contact)}
+                              className="px-2 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md"
                             >
                               Opt Out
-                            </button>
-                          ) : c.optOut ? (
-                            <button
-                              type="button"
-                              onClick={() => setConsentModalContact(c)}
-                              className="px-2 py-1 text-[11px] font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
-                              title="View Consent History & Audit Log"
-                            >
-                              View Consent History
                             </button>
                           ) : (
                             <button
                               type="button"
-                              onClick={() => setConsentModalContact(c)}
-                              className="px-2 py-1 text-[11px] font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors"
-                              title="Consent Details"
+                              onClick={() => setConsentModalContact(contact)}
+                              className="px-2 py-1 text-[11px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md"
                             >
-                              Consent Details
+                              {contact.optOut ? 'Consent History' : 'Consent'}
                             </button>
                           )}
 
                           <button
                             type="button"
                             onClick={() => {
-                              setContactToEdit(c);
+                              setContactToEdit(contact);
                               setIsAddModalOpen(true);
                             }}
-                            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md transition-colors"
+                            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-md"
                             title="Edit Contact"
                           >
                             <Edit className="w-3.5 h-3.5" />
@@ -571,11 +568,11 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
                             type="button"
                             onClick={() => {
                               if (confirm(`Delete contact ${displayName}?`)) {
-                                onDeleteContact(c.id);
+                                onDeleteContact(contact.id);
                                 toast('Contact deleted.');
                               }
                             }}
-                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md"
                             title="Delete Contact"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -590,7 +587,6 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
           </div>
         )}
 
-        {/* Pagination bar */}
         {filteredContacts.length > 0 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 bg-slate-50/50 text-xs text-slate-500">
             <div>
@@ -610,8 +606,8 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
               <button
                 type="button"
                 disabled={currentPage === 1}
-                onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
-                className="p-1.5 rounded-md border border-slate-200 bg-white text-slate-600 disabled:opacity-40 hover:bg-slate-50"
+                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                className="p-1.5 rounded-md border border-slate-200 bg-white disabled:opacity-40"
               >
                 <ChevronLeft className="w-3.5 h-3.5" />
               </button>
@@ -621,8 +617,8 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
               <button
                 type="button"
                 disabled={currentPage === totalPages}
-                onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))}
-                className="p-1.5 rounded-md border border-slate-200 bg-white text-slate-600 disabled:opacity-40 hover:bg-slate-50"
+                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                className="p-1.5 rounded-md border border-slate-200 bg-white disabled:opacity-40"
               >
                 <ChevronRight className="w-3.5 h-3.5" />
               </button>
@@ -631,7 +627,6 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         )}
       </div>
 
-      {/* Modals */}
       <AddContactModal
         isOpen={isAddModalOpen}
         onClose={() => {
@@ -651,9 +646,7 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         contactToEdit={contactToEdit}
         groups={groups}
         existingContacts={contacts}
-        onSelectExistingContact={(existing) => {
-          setContactToEdit(existing);
-        }}
+        onSelectExistingContact={(existing) => setContactToEdit(existing)}
       />
 
       <ImportContactsModal
@@ -661,8 +654,8 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         onClose={() => setIsImportModalOpen(false)}
         existingContacts={contacts}
         groups={groups}
-        onImportConfirm={(rows, defGrp) => {
-          onImportContacts(rows, defGrp);
+        onImportConfirm={(rows, defaultGroup) => {
+          onImportContacts(rows, defaultGroup);
           toast(`Successfully imported ${rows.length} contacts.`);
         }}
       />
@@ -671,8 +664,8 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         isOpen={isGroupsModalOpen}
         onClose={() => setIsGroupsModalOpen(false)}
         groups={groups}
-        onAddGroup={(name, desc) => {
-          onAddGroup(name, desc);
+        onAddGroup={(name, description) => {
+          onAddGroup(name, description);
           toast(`Group "${name}" created.`);
         }}
         onRenameGroup={(id, newName) => {
@@ -690,7 +683,23 @@ export const ContactsView: React.FC<ContactsViewProps> = ({
         onClose={() => setConsentModalContact(null)}
         contact={consentModalContact}
         historyEvents={optInHistory}
-        onResubscribe={(cid) => handleResubscribeContact(cid)}
+        onResubscribe={handleResubscribeContact}
+      />
+
+      <ContactMessagingModal
+        isOpen={messagingContacts.length > 0}
+        onClose={() => setMessagingContacts([])}
+        contacts={messagingContacts}
+        onSent={() => {
+          const count = messagingContacts.length;
+          toast(
+            count === 1
+              ? 'WhatsApp message sent. The conversation is now available in Inbox.'
+              : `Quick Broadcast sent to the eligible contacts from ${count} selected.`
+          );
+          setSelectedContactIds([]);
+          setMessagingContacts([]);
+        }}
       />
     </div>
   );
