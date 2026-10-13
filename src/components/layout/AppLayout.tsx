@@ -1,34 +1,37 @@
 import React, { useState } from 'react';
-import { 
-  LayoutDashboard, 
+import {
+  LayoutDashboard,
   Building2,
-  Users, 
-  Send, 
-  Inbox, 
-  Zap, 
-  FileText, 
-  Settings, 
-  LogOut, 
-  Menu, 
-  X, 
-  Radio,
+  Users,
+  Send,
+  Inbox,
+  Zap,
+  FileText,
+  Settings,
+  LogOut,
+  Menu,
+  X,
   RotateCcw,
-  Sparkles,
   Bot,
-  ChevronDown
+  ChevronDown,
 } from 'lucide-react';
-import { Organization, UserProfile, Client, WhatsAppConnection } from '../../types/index.ts';
+import type {
+  Organization,
+  UserProfile,
+  Client,
+  WhatsAppConnection,
+} from '../../types/index.ts';
 import { Badge } from '../common/Badge.tsx';
 import { AppLogo } from '../common/AppLogo.tsx';
 
-export type ActiveTab = 
-  | 'dashboard' 
+export type ActiveTab =
+  | 'dashboard'
   | 'clients'
-  | 'contacts' 
-  | 'broadcasts' 
-  | 'inbox' 
-  | 'automations' 
-  | 'templates' 
+  | 'contacts'
+  | 'broadcasts'
+  | 'inbox'
+  | 'automations'
+  | 'templates'
   | 'settings';
 
 export interface AppLayoutProps {
@@ -79,11 +82,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
     { id: 'clients', label: 'Clients', icon: Building2 },
     { id: 'contacts', label: 'Contacts', icon: Users },
     { id: 'broadcasts', label: 'Broadcasts', icon: Send },
-    { 
-      id: 'inbox', 
-      label: 'Inbox', 
-      icon: Inbox, 
-      badge: unreadMessagesCount > 0 ? unreadMessagesCount : undefined 
+    {
+      id: 'inbox',
+      label: 'Inbox',
+      icon: Inbox,
+      badge: unreadMessagesCount > 0 ? unreadMessagesCount : undefined,
     },
     { id: 'automations', label: 'Automations', icon: Zap },
     { id: 'templates', label: 'Templates', icon: FileText },
@@ -95,19 +98,32 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
     setMobileMenuOpen(false);
   };
 
-  const activeClients = clients.filter((c) => c.status === 'Active');
+  const activeClients = clients.filter((client) => client.status === 'Active');
+
+  const activeConnection = whatsappConnections.find(
+    (connection) => connection.clientId === activeClientId
+  );
+  const isActiveClientConnected = activeConnection?.connectionStatus === 'Connected';
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row text-slate-800 antialiased font-sans">
       {/* Mobile Top Bar */}
       <header className="md:hidden bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between z-30 sticky top-0">
-        <div className="flex items-center gap-2.5">
-          <AppLogo size="sm" />
-          <div>
-            <h1 className="font-bold text-slate-900 leading-tight">WatsManager</h1>
-            <p className="text-xs text-slate-500 truncate max-w-[150px]">{organization.name}</p>
+        <div className="flex items-center gap-3 min-w-0">
+          <AppLogo size="sm" className="shrink-0" />
+          <div className="min-w-0 border-l border-slate-200 pl-3">
+            <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-400">
+              Organization
+            </p>
+            <p
+              className="text-xs font-semibold text-slate-700 truncate max-w-[120px]"
+              title={organization.name}
+            >
+              {organization.name}
+            </p>
           </div>
         </div>
+
         <div className="flex items-center gap-2">
           {(!organization.whatsappConnected || devMode) && (
             <button
@@ -120,13 +136,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
               <Bot className="w-5 h-5 text-emerald-600" />
             </button>
           )}
+
           <button
             id="mobile-nav-toggle"
             type="button"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"
+            aria-label="Toggle navigation"
           >
-            {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+            {mobileMenuOpen ? (
+              <X className="w-6 h-6" />
+            ) : (
+              <Menu className="w-6 h-6" />
+            )}
           </button>
         </div>
       </header>
@@ -138,31 +160,45 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           mobileMenuOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >
-        {/* Top: Brand and Org */}
+        {/* Brand and Organization */}
         <div className="p-5 border-b border-slate-100">
-          <div className="flex items-center justify-between mb-4">
-            <AppLogo size="md" showText subtext="Cloud API V1" />
+          <div className="flex items-center justify-center mb-4 min-h-[52px]">
+            <AppLogo size="md" className="justify-center w-full" />
           </div>
 
           <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
             <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-0.5">
               Organization
             </div>
-            <div className="text-sm font-semibold text-slate-800 truncate" title={organization.name}>
+            <div
+              className="text-sm font-semibold text-slate-800 truncate"
+              title={organization.name}
+            >
               {organization.name}
             </div>
+
             <div className="flex items-center gap-1.5 mt-1">
-              <span className={`w-2 h-2 rounded-full ${organization.whatsappConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></span>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  organization.whatsappConnected
+                    ? 'bg-emerald-500 animate-pulse'
+                    : 'bg-amber-500'
+                }`}
+              />
               <span className="text-xs text-slate-500">
                 {organization.whatsappConnected ? 'WhatsApp Live' : 'Dev / Demo Mode'}
               </span>
             </div>
 
-            {/* Client selector underneath organization card (Requirement 6) */}
+            {/* Active Client */}
             <div className="pt-2.5 mt-2.5 border-t border-slate-200/70">
-              <label htmlFor="sidebar-client-select" className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+              <label
+                htmlFor="sidebar-client-select"
+                className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1"
+              >
                 Client
               </label>
+
               <div className="relative">
                 <select
                   id="sidebar-client-select"
@@ -171,9 +207,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                   className="w-full bg-white border border-slate-200 text-slate-800 text-xs rounded-lg px-2.5 py-1.5 pr-7 font-medium appearance-none hover:border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 cursor-pointer truncate shadow-2xs"
                   title="Switch Active Client"
                 >
-                  {activeClients.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
+                  {activeClients.map((client) => (
+                    <option key={client.id} value={client.id}>
+                      {client.name}
                     </option>
                   ))}
                   {activeClients.length === 0 && (
@@ -183,32 +219,34 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                 <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
               </div>
 
-              {/* Client-specific connection indicator (Requirement 10) */}
-              {(() => {
-                const activeConn = whatsappConnections.find((w) => w.clientId === activeClientId);
-                const isConn = activeConn?.connectionStatus === 'Connected';
-                return (
-                  <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-slate-100 text-[11px]">
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${
-                        isConn ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'
-                      }`}
-                    />
-                    <span className={`truncate font-medium ${isConn ? 'text-emerald-700' : 'text-slate-500'}`}>
-                      {isConn ? 'WhatsApp Connected' : 'WhatsApp Not Connected'}
-                    </span>
-                  </div>
-                );
-              })()}
+              <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-slate-100 text-[11px]">
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    isActiveClientConnected
+                      ? 'bg-emerald-500 animate-pulse'
+                      : 'bg-slate-300'
+                  }`}
+                />
+                <span
+                  className={`truncate font-medium ${
+                    isActiveClientConnected ? 'text-emerald-700' : 'text-slate-500'
+                  }`}
+                >
+                  {isActiveClientConnected
+                    ? 'WhatsApp Connected'
+                    : 'WhatsApp Not Connected'}
+                </span>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Navigation Items */}
+        {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = currentTab === item.id;
+
             return (
               <button
                 key={item.id}
@@ -223,10 +261,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
               >
                 <div className="flex items-center gap-3">
                   <Icon
-                    className={`w-4 h-4 ${isActive ? 'text-emerald-600' : 'text-slate-400'}`}
+                    className={`w-4 h-4 ${
+                      isActive ? 'text-emerald-600' : 'text-slate-400'
+                    }`}
                   />
                   <span>{item.label}</span>
                 </div>
+
                 {item.badge !== undefined && (
                   <span className="bg-emerald-600 text-white text-xs px-2 py-0.5 rounded-full font-bold">
                     {item.badge}
@@ -236,15 +277,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
             );
           })}
 
-          {/* Quick Utility Actions in Nav */}
+          {/* Testing / developer controls */}
           {(!organization.whatsappConnected || devMode) && (
             <div className="pt-4 mt-4 border-t border-slate-100 space-y-1">
               <div className="px-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between">
                 <span>Testing & Controls</span>
                 {organization.whatsappConnected && (
-                  <Badge variant="amber" size="sm">Dev Mode</Badge>
+                  <Badge variant="amber" size="sm">
+                    Dev Mode
+                  </Badge>
                 )}
               </div>
+
               <button
                 id="sidebar-simulator-btn"
                 type="button"
@@ -254,6 +298,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                 <Bot className="w-4 h-4 text-emerald-600" />
                 <span>Inbound Simulator</span>
               </button>
+
               <button
                 id="sidebar-reset-btn"
                 type="button"
@@ -267,22 +312,27 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           )}
         </nav>
 
-        {/* User Account & Logout */}
+        {/* User account */}
         <div className="p-4 border-t border-slate-100 bg-slate-50/50">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5 overflow-hidden">
               <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs shrink-0">
                 {user.displayName ? user.displayName[0].toUpperCase() : 'U'}
               </div>
+
               <div className="overflow-hidden">
                 <div className="text-xs font-semibold text-slate-900 truncate">
                   {user.displayName || 'Owner'}
                 </div>
-                <div className="text-[11px] text-slate-500 truncate" title={user.email}>
+                <div
+                  className="text-[11px] text-slate-500 truncate"
+                  title={user.email}
+                >
                   {user.email}
                 </div>
               </div>
             </div>
+
             <button
               id="sidebar-logout-btn"
               type="button"
@@ -324,21 +374,30 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
         </div>
       </aside>
 
-      {/* Main Content Area */}
+      {/* Main content */}
       <main className="flex-1 min-w-0 flex flex-col min-h-screen">
-        {/* Top Context Bar */}
+        {/* Desktop Context Bar */}
         <div className="hidden md:flex items-center justify-between px-8 py-3.5 bg-white border-b border-slate-200 sticky top-0 z-20">
           <div className="flex items-center gap-3">
             <h2 className="text-base font-semibold text-slate-900 capitalize">
               {currentTab}
             </h2>
+
             {organization.whatsappConnected ? (
-              <Badge variant="emerald" size="sm" id="header-whatsapp-status-badge">
+              <Badge
+                variant="emerald"
+                size="sm"
+                id="header-whatsapp-status-badge"
+              >
                 WhatsApp Cloud API (Live)
               </Badge>
             ) : (
               <div className="flex items-center gap-2">
-                <Badge variant="amber" size="sm" id="header-whatsapp-status-badge">
+                <Badge
+                  variant="amber"
+                  size="sm"
+                  id="header-whatsapp-status-badge"
+                >
                   Demo Mode
                 </Badge>
                 <span className="text-xs text-slate-400 font-medium hidden lg:inline">
@@ -347,6 +406,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
               </div>
             )}
           </div>
+
           <div className="flex items-center gap-2.5">
             {organization.whatsappConnected && (
               <button
@@ -376,6 +436,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                   <Bot className="w-3.5 h-3.5 text-emerald-600" />
                   <span>Simulate Customer Message</span>
                 </button>
+
                 <button
                   id="header-reset-btn"
                   type="button"
@@ -390,10 +451,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           </div>
         </div>
 
-        {/* Workspace Body */}
-        <div className="flex-1 p-4 md:p-8 overflow-x-hidden">
-          {children}
-        </div>
+        <div className="flex-1 p-4 md:p-8 overflow-x-hidden">{children}</div>
       </main>
     </div>
   );
