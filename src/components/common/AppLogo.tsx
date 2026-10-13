@@ -15,42 +15,40 @@ export const AppLogo: React.FC<AppLogoProps> = ({
 }) => {
   const [imageError, setImageError] = useState(false);
 
-  const sizeClasses = {
-    sm: 'w-7 h-7 rounded-lg text-sm',
-    md: 'w-9 h-9 rounded-xl text-base',
-    lg: 'w-11 h-11 rounded-xl text-lg',
-    xl: 'w-14 h-14 rounded-2xl text-2xl',
+  const logoWidths = {
+    sm: 'w-28',
+    md: 'w-36',
+    lg: 'w-48',
+    xl: 'w-60',
   };
 
-  return (
-    <div className={`flex items-center gap-2.5 ${className}`}>
-      <div
-        className={`${sizeClasses[size]} relative overflow-hidden bg-gradient-to-tr from-emerald-700 via-emerald-600 to-teal-500 shadow-sm flex items-center justify-center shrink-0 border border-emerald-400/20`}
-      >
-        {!imageError ? (
-          <img
-            src="/logo.png"
-            alt="WatsManager Logo"
-            className="w-full h-full object-cover"
-            onError={() => setImageError(true)}
-          />
-        ) : (
-          <span className="font-extrabold text-white tracking-tight">W</span>
-        )}
-      </div>
+  if (imageError) {
+    return (
+      <div className={`flex items-center gap-2 ${className}`}>
+        <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-700 via-emerald-600 to-teal-500 flex items-center justify-center">
+          <span className="font-extrabold text-white">W</span>
+        </div>
 
-      {showText && (
         <div className="flex flex-col">
-          <span className="font-bold text-slate-900 tracking-tight leading-tight">
-            WatsManager
-          </span>
+          <span className="font-bold text-slate-900">WatsManager</span>
           {subtext && (
-            <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+            <span className="text-[11px] uppercase tracking-wider text-slate-400">
               {subtext}
             </span>
           )}
         </div>
-      )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`flex items-center ${className}`}>
+      <img
+        src="/watsmanager-logo.png"
+        alt="WatsManager Cloud API Platform"
+        className={`${logoWidths[size]} h-auto object-contain`}
+        onError={() => setImageError(true)}
+      />
     </div>
   );
 };
